@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,8 +22,15 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew || true
+      - name: Prepare Keystore & Environment
+        run: |
+          chmod +x gradlew || true
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
 
       - name: Run Unit & Robolectric Tests
         run: ./gradlew testDebugUnitTest
@@ -35,3 +43,4 @@ jobs:
         with:
           name: sigma-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   release:
@@ -20,6 +21,16 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Prepare Keystore & Environment
+        run: |
+          chmod +x gradlew || true
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
+
       - name: Build Release Bundle (AAB) & APK
         run: ./gradlew assembleRelease bundleRelease || ./gradlew assembleDebug
 
@@ -30,3 +41,4 @@ jobs:
           path: |
             app/build/outputs/apk/**/*.apk
             app/build/outputs/bundle/**/*.aab
+          if-no-files-found: warn
