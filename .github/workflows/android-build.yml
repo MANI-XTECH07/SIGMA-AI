@@ -20,16 +20,25 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare Keystore & Environment
         run: |
           chmod +x gradlew || true
-          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 --decode debug.keystore.base64 > debug.keystore
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 --decode debug.keystore.base64 > debug.keystore || openssl base64 -d -in debug.keystore.base64 -out debug.keystore || true
           fi
-          if [ -f ".env.example" ] && [ ! -f ".env" ]; then
-            cp .env.example .env
+          if [ ! -f "debug.keystore" ] || [ ! -s "debug.keystore" ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
           fi
           touch local.properties
 
