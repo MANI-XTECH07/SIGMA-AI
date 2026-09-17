@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">SIGMA</string>
+    <string name="accessibility_service_description">Enables SIGMA to navigate screens, read content, and control apps on your command.</string>
+</resources>
