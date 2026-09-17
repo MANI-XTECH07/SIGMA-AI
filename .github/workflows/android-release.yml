@@ -14,10 +14,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
           cache: gradle
 
@@ -25,14 +25,21 @@ jobs:
         run: |
           chmod +x gradlew || true
           if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 --decode debug.keystore.base64 > debug.keystore
           fi
           if [ -f ".env.example" ] && [ ! -f ".env" ]; then
             cp .env.example .env
           fi
+          touch local.properties
 
       - name: Build Release Bundle (AAB) & APK
-        run: ./gradlew assembleRelease bundleRelease || ./gradlew assembleDebug
+        run: |
+          if [ -n "$STORE_PASSWORD" ] && [ -f "${KEYSTORE_PATH:-my-upload-key.jks}" ]; then
+            ./gradlew bundleRelease assembleRelease --stacktrace
+          else
+            echo "Signing keys not configured in secrets. Building debug/unsigned APK."
+            ./gradlew assembleDebug --stacktrace
+          fi
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
