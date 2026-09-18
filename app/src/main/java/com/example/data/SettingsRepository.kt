@@ -42,6 +42,10 @@ class SettingsRepository(context: Context) {
         get() = prefs.getBoolean(KEY_BACKGROUND_SERVICE, false)
         set(value) = prefs.edit().putBoolean(KEY_BACKGROUND_SERVICE, value).apply()
 
+    var backgroundAssistantEnabled: Boolean
+        get() = isBackgroundServiceEnabled
+        set(value) { isBackgroundServiceEnabled = value }
+
     var animationQuality: AnimationQuality
         get() {
             val name = prefs.getString(KEY_ANIMATION_QUALITY, AnimationQuality.HIGH.name)

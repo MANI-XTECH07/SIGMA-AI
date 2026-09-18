@@ -215,6 +215,15 @@ class MainActivity : ComponentActivity() {
             }
         )
 
+        val hasAudioPerm = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasAudioPerm && settingsRepository.backgroundAssistantEnabled) {
+            SigmaVoiceService.start(this)
+        }
+
         setContent {
             SigmaTheme {
                 SigmaRootApp()
@@ -276,13 +285,25 @@ class MainActivity : ComponentActivity() {
         var showSplash by remember { mutableStateOf(true) }
         var currentDestination by remember { mutableStateOf("HOME") }
         val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-        val sessionState by voiceSessionManager.sessionState.collectAsState()
-        val liveRms by voiceSessionManager.liveRms.collectAsState()
-        val scope = rememberCoroutineScope()
-
         var spokenDisplay by remember { mutableStateOf("") }
         var responseDisplay by remember { mutableStateOf("Say \"Hey Sigma\" or tap the mic to begin.") }
         var pendingConfirmation by remember { mutableStateOf<RouterResult.NeedConfirmation?>(null) }
+
+        val sessionState by voiceSessionManager.sessionState.collectAsState()
+        val liveRms by voiceSessionManager.liveRms.collectAsState()
+
+        val serviceRunning by SigmaVoiceService.isServiceRunning.collectAsState()
+        val serviceSessionState by SigmaVoiceService.sessionStateFlow.collectAsState()
+        val serviceLiveRms by SigmaVoiceService.liveRmsFlow.collectAsState()
+        val serviceLastTranscript by SigmaVoiceService.lastTranscriptFlow.collectAsState()
+        val serviceLastResponse by SigmaVoiceService.lastResponseFlow.collectAsState()
+
+        val effectiveSessionState = if (serviceRunning) serviceSessionState else sessionState
+        val effectiveLiveRms = if (serviceRunning) serviceLiveRms else liveRms
+        val effectiveTranscript = if (serviceRunning && serviceLastTranscript.isNotEmpty()) serviceLastTranscript else spokenDisplay.ifEmpty { activeSpeechText }
+        val effectiveResponse = if (serviceRunning && serviceLastResponse.isNotEmpty()) serviceLastResponse else responseDisplay.ifEmpty { activeResponseText }
+
+        val scope = rememberCoroutineScope()
 
         val permissionLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -370,11 +391,11 @@ class MainActivity : ComponentActivity() {
                 ) {
                     when (currentDestination) {
                         "HOME" -> MainScreen(
-                            state = sessionState,
-                            rmsLevel = liveRms,
-                            spokenText = spokenDisplay.ifEmpty { activeSpeechText },
-                            responseText = responseDisplay.ifEmpty { activeResponseText },
-                            isListening = sessionState == AssistantSessionState.LISTENING,
+                            state = effectiveSessionState,
+                            rmsLevel = effectiveLiveRms,
+                            spokenText = effectiveTranscript,
+                            responseText = effectiveResponse,
+                            isListening = effectiveSessionState == AssistantSessionState.LISTENING,
                             animationQuality = settingsRepository.animationQuality,
                             reduceMotion = settingsRepository.isReduceMotion,
                             onMicClick = {
@@ -385,17 +406,29 @@ class MainActivity : ComponentActivity() {
                                 if (!hasAudio) {
                                     permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
                                 } else {
-                                    if (sessionState == AssistantSessionState.LISTENING) {
-                                        speechRecognitionManager.stopListening()
+                                    if (serviceRunning) {
+                                        if (effectiveSessionState == AssistantSessionState.LISTENING) {
+                                            SigmaVoiceService.instance?.stopListeningInternal()
+                                        } else {
+                                            SigmaVoiceService.triggerListen(this@MainActivity)
+                                        }
                                     } else {
-                                        textToSpeechManager.stop()
-                                        speechRecognitionManager.startListening()
+                                        if (sessionState == AssistantSessionState.LISTENING) {
+                                            speechRecognitionManager.stopListening()
+                                        } else {
+                                            textToSpeechManager.stop()
+                                            speechRecognitionManager.startListening()
+                                        }
                                     }
                                 }
                             },
                             onSendCommand = { cmd ->
                                 spokenDisplay = cmd
-                                handleSpokenText(cmd)
+                                if (serviceRunning) {
+                                    SigmaVoiceService.instance?.handleIncomingSpokenText(cmd)
+                                } else {
+                                    handleSpokenText(cmd)
+                                }
                             },
                             onQuickActionClick = { action ->
                                 when (action) {
@@ -520,18 +553,30 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                         else -> MainScreen(
-                            state = sessionState,
-                            rmsLevel = liveRms,
-                            spokenText = spokenDisplay.ifEmpty { activeSpeechText },
-                            responseText = responseDisplay.ifEmpty { activeResponseText },
-                            isListening = sessionState == AssistantSessionState.LISTENING,
+                            state = effectiveSessionState,
+                            rmsLevel = effectiveLiveRms,
+                            spokenText = effectiveTranscript,
+                            responseText = effectiveResponse,
+                            isListening = effectiveSessionState == AssistantSessionState.LISTENING,
                             animationQuality = settingsRepository.animationQuality,
                             reduceMotion = settingsRepository.isReduceMotion,
                             onMicClick = {
-                                speechRecognitionManager.startListening()
+                                if (serviceRunning) {
+                                    if (effectiveSessionState == AssistantSessionState.LISTENING) {
+                                        SigmaVoiceService.instance?.stopListeningInternal()
+                                    } else {
+                                        SigmaVoiceService.triggerListen(this@MainActivity)
+                                    }
+                                } else {
+                                    speechRecognitionManager.startListening()
+                                }
                             },
                             onSendCommand = { cmd ->
-                                handleSpokenText(cmd)
+                                if (serviceRunning) {
+                                    SigmaVoiceService.instance?.handleIncomingSpokenText(cmd)
+                                } else {
+                                    handleSpokenText(cmd)
+                                }
                             },
                             onQuickActionClick = { act ->
                                 scope.launch { drawerState.open() }
