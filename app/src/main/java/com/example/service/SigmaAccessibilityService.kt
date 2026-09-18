@@ -35,7 +35,7 @@ class SigmaAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "SigmaAccessibilityService connected")
+        Log.d(TAG, "SigmaAccessibilityService connected successfully")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -66,11 +66,7 @@ class SigmaAccessibilityService : AccessibilityService() {
 
         fun traverse(node: AccessibilityNodeInfo?) {
             if (node == null) return
-
-            // Safety rule: Skip sensitive / password fields
-            if (node.isPassword) {
-                return
-            }
+            if (node.isPassword) return
 
             val text = node.text?.toString()?.trim()
             val desc = node.contentDescription?.toString()?.trim()
@@ -90,29 +86,41 @@ class SigmaAccessibilityService : AccessibilityService() {
         return textList
     }
 
+    /**
+     * Finds and clicks a node matching targetText by exact text, contentDescription, or partial match,
+     * walking up the parent tree if the node itself isn't marked isClickable.
+     */
     fun clickByText(targetText: String, ignoreCase: Boolean = true): Boolean {
         val rootNode = rootInActiveWindow ?: return false
+
+        // 1. Direct system match
         val matchedNodes = rootNode.findAccessibilityNodeInfosByText(targetText)
-
         for (node in matchedNodes) {
-            if (node.isClickable) {
-                val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                if (clicked) return true
-            }
-
-            // Check parent hierarchy
-            var parent = node.parent
-            while (parent != null) {
-                if (parent.isClickable) {
-                    val clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    if (clicked) return true
-                }
-                parent = parent.parent
-            }
+            if (performClickHierarchy(node)) return true
         }
 
-        // Try fuzzy traversal if direct search failed
+        // 2. Recursive fuzzy match
         return fuzzyFindAndClick(rootNode, targetText)
+    }
+
+    private fun performClickHierarchy(node: AccessibilityNodeInfo?): Boolean {
+        var current = node
+        while (current != null) {
+            if (current.isClickable) {
+                val clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) return true
+            }
+            current = current.parent
+        }
+        // If node has bounds, try gesture tap fallback
+        if (node != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                return tapCoordinates(rect.centerX().toFloat(), rect.centerY().toFloat())
+            }
+        }
+        return false
     }
 
     private fun fuzzyFindAndClick(node: AccessibilityNodeInfo?, target: String): Boolean {
@@ -123,16 +131,7 @@ class SigmaAccessibilityService : AccessibilityService() {
         val targetLower = target.lowercase()
 
         if ((text.contains(targetLower) || desc.contains(targetLower)) && !node.isPassword) {
-            if (node.isClickable) {
-                return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            }
-            var parent = node.parent
-            while (parent != null) {
-                if (parent.isClickable) {
-                    return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
-                parent = parent.parent
-            }
+            if (performClickHierarchy(node)) return true
         }
 
         for (i in 0 until node.childCount) {
@@ -143,44 +142,133 @@ class SigmaAccessibilityService : AccessibilityService() {
         return false
     }
 
-    fun findEditableAndSetText(textToType: String): Boolean {
+    /**
+     * Dynamically finds search icon, search button, or search box in the active window.
+     */
+    fun findAndClickSearch(): Boolean {
         val rootNode = rootInActiveWindow ?: return false
 
-        // 1. Try focused element
-        val focusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        val searchKeywords = listOf("search", "search here", "search youtube", "search google", "type to search", "khoj", "find")
 
-        if (focusedNode != null && focusedNode.isEditable) {
-            val arguments = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
-            }
-            return focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-        }
-
-        // 2. Search for any editable node in hierarchy
-        fun findEditable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        // 1. Find by view ID containing search
+        fun findByViewId(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if (node == null) return null
-            if (node.isEditable && !node.isPassword) return node
+            val viewId = node.viewIdResourceName?.lowercase() ?: ""
+            if (viewId.contains("search") || viewId.contains("menu_search") || viewId.contains("search_button")) {
+                return node
+            }
             for (i in 0 until node.childCount) {
-                val res = findEditable(node.getChild(i))
-                if (res != null) return res
+                val found = findByViewId(node.getChild(i))
+                if (found != null) return found
             }
             return null
         }
 
-        val editable = findEditable(rootNode)
+        val searchIdNode = findByViewId(rootNode)
+        if (searchIdNode != null && performClickHierarchy(searchIdNode)) {
+            Log.d(TAG, "Clicked search node by viewId")
+            return true
+        }
+
+        // 2. Find by text or content description
+        for (keyword in searchKeywords) {
+            if (clickByText(keyword)) {
+                Log.d(TAG, "Clicked search node by keyword: $keyword")
+                return true
+            }
+        }
+
+        // 3. Find any editable EditText
+        val editable = findEditableNode(rootNode)
+        if (editable != null) {
+            editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            return performClickHierarchy(editable)
+        }
+
+        return false
+    }
+
+    /**
+     * Sets text on the currently focused or first available editable field.
+     */
+    fun findEditableAndSetText(textToType: String): Boolean {
+        val rootNode = rootInActiveWindow ?: return false
+
+        // 1. Focused element
+        val focusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+
+        if (focusedNode != null && (focusedNode.isEditable || focusedNode.className?.toString()?.contains("EditText") == true)) {
+            val arguments = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
+            }
+            focusedNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            return focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        }
+
+        // 2. First editable in hierarchy
+        val editable = findEditableNode(rootNode)
         if (editable != null) {
             val arguments = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
             }
+            editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             return editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         }
 
         return false
     }
 
+    private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if ((node.isEditable || node.className?.toString()?.contains("EditText") == true) && !node.isPassword) {
+            return node
+        }
+        for (i in 0 until node.childCount) {
+            val res = findEditableNode(node.getChild(i))
+            if (res != null) return res
+        }
+        return null
+    }
+
     fun typeTextIntoFocused(textToType: String): Boolean {
         return findEditableAndSetText(textToType)
+    }
+
+    /**
+     * Locates the first matching search result or video card and clicks it.
+     */
+    fun findAndClickResult(query: String): Boolean {
+        val rootNode = rootInActiveWindow ?: return false
+
+        // Try direct click by words in query
+        val words = query.split(" ").filter { it.length > 2 }
+        for (word in words) {
+            if (clickByText(word)) return true
+        }
+
+        // Try clicking first substantial clickable item in list
+        fun findFirstContentCard(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (node == null) return null
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val hasContent = (text.length > 5 || desc.length > 5) && !text.equals("Search", true) && !desc.equals("Search", true)
+            if (hasContent && (node.isClickable || node.parent?.isClickable == true)) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val found = findFirstContentCard(node.getChild(i))
+                if (found != null) return found
+            }
+            return null
+        }
+
+        val card = findFirstContentCard(rootNode)
+        if (card != null) {
+            return performClickHierarchy(card)
+        }
+
+        return false
     }
 
     fun performSwipeGesture(
@@ -272,4 +360,3 @@ class SigmaAccessibilityService : AccessibilityService() {
         }
     }
 }
-

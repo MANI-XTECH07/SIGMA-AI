@@ -1,177 +1,115 @@
 package com.example.router
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
-import android.util.DisplayMetrics
+import android.util.Log
 import com.example.ai.ActionPlanner
-import com.example.ai.VisionService
+import com.example.ai.AiProvider
 import com.example.apps.AppResolutionResult
 import com.example.apps.AppResolver
 import com.example.automation.AutomationEngine
+import com.example.automation.AutomationPlan
 import com.example.data.ConversationDao
 import com.example.data.db.CommandHistoryItem
 import com.example.data.db.SigmaRepository
 import com.example.device.DeviceController
-import com.example.device.LockController
+import com.example.device.TorchController
+import com.example.screen.ScreenAnalysisManager
 import com.example.service.SigmaAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 sealed class RouterResult {
-    data class Spoken(val speechText: String, val actionType: String = "INFO") : RouterResult()
+    data class Spoken(val text: String, val actionType: String? = null) : RouterResult()
     data class NeedConfirmation(
         val title: String,
         val description: String,
         val actionType: String,
         val onConfirm: suspend () -> RouterResult
     ) : RouterResult()
-    data class ContentPreview(
-        val title: String,
-        val text: String,
-        val imageUrl: String? = null
-    ) : RouterResult()
 }
 
 class ActionRouter(
     private val context: Context,
-    private val repository: SigmaRepository,
-    private val conversationDao: ConversationDao,
     private val appResolver: AppResolver,
     private val deviceController: DeviceController,
-    private val lockController: LockController,
-    private val automationEngine: AutomationEngine,
+    private val torchController: TorchController,
+    private val screenAnalysisManager: ScreenAnalysisManager,
     private val actionPlanner: ActionPlanner,
-    private val visionService: VisionService
+    private val automationEngine: AutomationEngine,
+    private val aiProvider: AiProvider,
+    private val repository: SigmaRepository,
+    private val conversationDao: ConversationDao
 ) {
 
-    suspend fun executeCommand(
-        rawPrompt: String,
-        activity: Activity? = null,
-        metrics: DisplayMetrics? = null
-    ): RouterResult = withContext(Dispatchers.IO) {
-        val trimmed = rawPrompt.trim()
+    companion object {
+        private const val TAG = "ActionRouter"
+    }
+
+    suspend fun routeUserSpeech(rawTranscript: String): RouterResult = withContext(Dispatchers.IO) {
+        val trimmed = rawTranscript.trim()
         val lower = trimmed.lowercase()
 
-        // 1. DEVICE LOCK (Rule 12: Real Phone Locking)
-        if (lower.contains("phone lock") || lower.contains("lock phone") || lower == "lock" || lower.contains("screen lock")) {
-            val locked = lockController.lockPhone()
-            val message = if (locked) "Locking." else "Accessibility Service is required to lock device."
-            logHistory(trimmed, locked, message)
-            return@withContext RouterResult.Spoken(message, "DEVICE_LOCK")
+        Log.d(TAG, "Routing transcript: \"$trimmed\"")
+
+        // 1. SCREEN VISION & ANALYSIS
+        if (lower.contains("analyze screen") || lower.contains("what is on my screen") ||
+            lower.contains("kya dikh raha hai") || lower.contains("screen dekho") ||
+            lower.contains("what's on my screen") || lower.contains("read screen")
+        ) {
+            val result = screenAnalysisManager.analyzeCurrentScreen()
+            logHistory(trimmed, true, result.summary)
+            return@withContext RouterResult.Spoken(result.summary, "SCREEN_ANALYSIS")
         }
 
-        // 2. DEVICE UNLOCK (Rule 12: Explain security limitations honestly)
-        if (lower.contains("phone unlock") || lower.contains("unlock phone") || lower == "unlock") {
-            if (activity != null) {
-                lockController.promptSecureUnlock(
-                    activity = activity,
-                    onUnlocked = { },
-                    onCancelled = { }
-                )
-                val msg = "Please enter your PIN, pattern, or biometric to unlock."
-                logHistory(trimmed, true, msg)
-                return@withContext RouterResult.Spoken(msg, "DEVICE_UNLOCK")
-            } else {
-                val msg = "Please turn on your screen and use your biometric or PIN to unlock."
-                logHistory(trimmed, true, msg)
-                return@withContext RouterResult.Spoken(msg, "DEVICE_UNLOCK")
-            }
-        }
-
-        // 3. VOLUME CONTROLS (Rule 13)
-        if (lower.contains("volume up") || lower.contains("awaz badhao")) {
-            val success = deviceController.adjustVolume(true)
-            val msg = if (success) "Volume increased." else "Could not adjust volume."
-            logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "VOLUME")
-        }
-        if (lower.contains("volume down") || lower.contains("awaz kam karo")) {
-            val success = deviceController.adjustVolume(false)
-            val msg = if (success) "Volume decreased." else "Could not adjust volume."
-            logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "VOLUME")
-        }
-        if (lower.contains("mute")) {
-            val success = deviceController.setVolumePercentage(0)
-            val msg = if (success) "Muted." else "Could not mute volume."
-            logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "VOLUME")
-        }
-
-        // 4. SCREEN VISION (Rule 8: Real Screen Analysis)
-        if (lower.contains("read screen") || lower.contains("what is on my screen") || lower.contains("screen dekho") || lower.contains("explain screen")) {
-            val analysis = if (metrics != null) {
-                visionService.captureAndExplain(metrics)
-            } else {
-                val service = SigmaAccessibilityService.instance
-                if (service != null) {
-                    val texts = service.extractScreenText()
-                    if (texts.isNotEmpty()) "Visible on screen: " + texts.take(5).joinToString(", ")
-                    else "No text detected on screen."
-                } else {
-                    "Please enable Accessibility Service or Screen Capture in settings."
+        if (lower.contains("take screenshot") || lower.contains("screenshot lo") || lower.contains("screen capture")) {
+            val service = SigmaAccessibilityService.instance
+            if (service != null) {
+                service.takeScreenshotCompat { bitmap ->
+                    Log.d(TAG, "Screenshot captured via accessibility: ${bitmap != null}")
                 }
+                val msg = "Taking screenshot."
+                logHistory(trimmed, true, msg)
+                return@withContext RouterResult.Spoken(msg, "SCREENSHOT")
+            } else {
+                val msg = "Accessibility service required to capture screenshot."
+                logHistory(trimmed, false, msg)
+                return@withContext RouterResult.Spoken(msg, "SCREENSHOT")
             }
-            logHistory(trimmed, true, analysis.take(60))
-            return@withContext RouterResult.Spoken(analysis, "SCREEN_READ")
         }
 
-        // 5. NAVIGATION & GESTURES
-        if (lower == "go home" || lower == "home screen" || lower.contains("home jao")) {
-            val service = SigmaAccessibilityService.instance
-            val success = service?.goHome() ?: false
-            if (!success) launchHomeIntent()
-            logHistory(trimmed, true, "Going home.")
-            return@withContext RouterResult.Spoken("Going home.", "NAVIGATION")
-        }
-
-        if (lower == "go back" || lower == "back" || lower.contains("peeche jao")) {
-            val service = SigmaAccessibilityService.instance
-            val success = service?.goBack() ?: false
-            val msg = if (success) "Navigating back." else "Accessibility Service needed to navigate back."
+        // 2. HARDWARE & DEVICE CONTROLS (Flashlight, Volume, Brightness)
+        if (lower.contains("flashlight on") || lower.contains("torch on") || lower.contains("torch jalao")) {
+            val success = torchController.turnOnTorch()
+            val msg = if (success) "Flashlight turned on." else "Could not enable flashlight."
             logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "NAVIGATION")
+            return@withContext RouterResult.Spoken(msg, "TORCH_ON")
         }
 
-        if (lower.contains("scroll down") || lower.contains("neeche scroll")) {
-            val service = SigmaAccessibilityService.instance
-            val success = service?.scrollForward() ?: false
-            val msg = if (success) "Scrolling." else "Cannot scroll."
+        if (lower.contains("flashlight off") || lower.contains("torch off") || lower.contains("torch band karo")) {
+            val success = torchController.turnOffTorch()
+            val msg = if (success) "Flashlight turned off." else "Could not disable flashlight."
             logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "SCROLL")
+            return@withContext RouterResult.Spoken(msg, "TORCH_OFF")
         }
 
-        if (lower.contains("scroll up") || lower.contains("upar scroll")) {
-            val service = SigmaAccessibilityService.instance
-            val success = service?.scrollBackward() ?: false
-            val msg = if (success) "Scrolling." else "Cannot scroll."
-            logHistory(trimmed, success, msg)
-            return@withContext RouterResult.Spoken(msg, "SCROLL")
+        if (lower.contains("volume up") || lower.contains("awaz badhao")) {
+            val success = deviceController.adjustVolume(increase = true)
+            val msg = if (success) "Volume increased." else "Volume adjusted."
+            logHistory(trimmed, true, msg)
+            return@withContext RouterResult.Spoken(msg, "VOLUME")
         }
 
-        // 6. APP LAUNCHING (Rule 10: Dynamic Resolution)
-        if (lower.startsWith("open ") || lower.startsWith("launch ") || lower.contains("kholo")) {
-            val query = trimmed.replace("open", "", ignoreCase = true)
-                .replace("launch", "", ignoreCase = true)
-                .replace("kholo", "", ignoreCase = true)
-                .replace("sigma", "", ignoreCase = true)
-                .trim()
-
-            val resolution = appResolver.resolveAndLaunch(query)
-            val (success, speech) = when (resolution) {
-                is AppResolutionResult.Success -> true to "Opening ${resolution.app.label}."
-                is AppResolutionResult.MultipleMatches -> true to "Opening ${resolution.candidates.first().label}."
-                is AppResolutionResult.NotFound -> false to "I couldn't find an installed app named $query."
-            }
-            logHistory(trimmed, success, speech)
-            return@withContext RouterResult.Spoken(speech, "APP_LAUNCH")
+        if (lower.contains("volume down") || lower.contains("awaz kam karo")) {
+            val success = deviceController.adjustVolume(increase = false)
+            val msg = if (success) "Volume decreased." else "Volume adjusted."
+            logHistory(trimmed, true, msg)
+            return@withContext RouterResult.Spoken(msg, "VOLUME")
         }
 
-        // 7. CALLING & CONTACTS (Rule 11: Real Contact Search & Confirmation)
+        // 3. CALLING & CONTACTS (Confirmation required)
         if (lower.startsWith("call ") || lower.contains("ko call karo")) {
             val target = trimmed.replace("call", "", ignoreCase = true)
                 .replace("ko call karo", "", ignoreCase = true)
@@ -195,7 +133,7 @@ class ActionRouter(
             )
         }
 
-        // 8. SEND MESSAGE / SMS (Confirmation required)
+        // 4. SEND MESSAGE / SMS (Confirmation required)
         if (lower.startsWith("message ") || lower.startsWith("sms ") || lower.contains("ko message bhejo")) {
             val payload = trimmed.substringAfter(" ").trim()
             return@withContext RouterResult.NeedConfirmation(
@@ -215,7 +153,36 @@ class ActionRouter(
             )
         }
 
-        // 9. SYSTEM SETTINGS
+        // 5. STRUCTURED AUTOMATION BEAST LOOP (Chained multi-step or deep UI actions)
+        val plan = actionPlanner.planUserCommand(trimmed)
+        if (plan.steps.isNotEmpty()) {
+            val report = automationEngine.executePlanWithReport(plan) { progress ->
+                Log.d(TAG, "Plan progress: $progress")
+            }
+            logHistory(trimmed, report.success, report.finalMessage)
+            return@withContext RouterResult.Spoken(report.finalMessage, "AUTOMATION")
+        }
+
+        // 6. DIRECT APP LAUNCHING (Dynamic resolution using Android PackageManager)
+        if (lower.startsWith("open ") || lower.startsWith("launch ") || lower.contains("kholo") || lower.contains("chalao")) {
+            val query = trimmed.replace("open", "", ignoreCase = true)
+                .replace("launch", "", ignoreCase = true)
+                .replace("kholo", "", ignoreCase = true)
+                .replace("chalao", "", ignoreCase = true)
+                .replace("sigma", "", ignoreCase = true)
+                .trim()
+
+            val resolution = appResolver.resolveAndLaunch(query)
+            val (success, speech) = when (resolution) {
+                is AppResolutionResult.Success -> true to "Opening ${resolution.app.label}."
+                is AppResolutionResult.MultipleMatches -> true to "Opening ${resolution.candidates.first().label}."
+                is AppResolutionResult.NotFound -> false to "I couldn't find an installed app named $query."
+            }
+            logHistory(trimmed, success, speech)
+            return@withContext RouterResult.Spoken(speech, "APP_LAUNCH")
+        }
+
+        // 7. SYSTEM SETTINGS
         if (lower.contains("wifi") || lower.contains("wi-fi")) {
             val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
             context.startActivity(intent)
@@ -228,15 +195,6 @@ class ActionRouter(
             context.startActivity(intent)
             logHistory(trimmed, true, "Opening Bluetooth settings.")
             return@withContext RouterResult.Spoken("Opening Bluetooth settings.", "SETTINGS")
-        }
-
-        // 10. MULTI-STEP AUTOMATION BEAST LOOP (Rules 14-17)
-        val plan = actionPlanner.planUserCommand(trimmed)
-        if (plan.steps.isNotEmpty()) {
-            val completed = automationEngine.executePlan(plan) { progressMsg -> }
-            val outcome = if (completed) "Done." else "Action failed."
-            logHistory(trimmed, completed, outcome)
-            return@withContext RouterResult.Spoken(outcome, "AUTOMATION")
         }
 
         // Fallback: AI response
@@ -263,13 +221,5 @@ class ActionRouter(
         } catch (e: Exception) {
             // Non-blocking log failure
         }
-    }
-
-    private fun launchHomeIntent() {
-        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        context.startActivity(homeIntent)
     }
 }

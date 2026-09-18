@@ -104,6 +104,7 @@ fun SidebarDrawer(
                 Triple("APPS", "App Control", Icons.Default.Apps),
                 Triple("AUTOMATION", "Automation", Icons.Default.SmartToy),
                 Triple("SCREEN", "Screen Analyzer", Icons.Default.ScreenSearchDesktop),
+                Triple("DIAGNOSTICS", "Diagnostics", Icons.Default.SmartToy),
                 Triple("CONTACTS", "Contacts", Icons.Default.ContactPhone),
                 Triple("SETTINGS", "Settings", Icons.Default.Settings)
             )

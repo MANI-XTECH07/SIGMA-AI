@@ -4,11 +4,9 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.projection.MediaProjectionManager as AndroidMediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.DisplayMetrics
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -17,45 +15,38 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,27 +67,23 @@ import com.example.data.db.SigmaDatabase
 import com.example.data.db.SigmaRepository
 import com.example.device.DeviceController
 import com.example.device.LockController
+import com.example.device.TorchController
 import com.example.router.ActionRouter
 import com.example.router.RouterResult
 import com.example.screen.MediaProjectionManager
 import com.example.screen.ScreenAnalysisManager
 import com.example.screen.ScreenCaptureManager
+import com.example.service.SigmaAccessibilityService
 import com.example.service.SigmaVoiceService
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.rememberDrawerState
 import com.example.ui.AutomationScreen
+import com.example.ui.DiagnosticsScreen
 import com.example.ui.HistoryScreen
+import com.example.ui.LockScreenView
 import com.example.ui.MainScreen
 import com.example.ui.PermissionScreen
 import com.example.ui.SettingsScreen
-import com.example.ui.LockScreenView
 import com.example.ui.SidebarDrawer
 import com.example.ui.SplashScreen
-import com.example.ui.theme.SigmaBlack
-import com.example.ui.theme.SigmaDeepBlack
 import com.example.ui.theme.SigmaNeonRed
 import com.example.ui.theme.SigmaNeonRedBright
 import com.example.ui.theme.SigmaSurfaceBlack
@@ -107,7 +94,6 @@ import com.example.voice.SpeechRecognitionManager
 import com.example.voice.TextToSpeechManager
 import com.example.voice.VoiceSessionManager
 import com.example.voice.WakeWordManager
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -117,6 +103,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var conversationDao: ConversationDao
 
     private lateinit var deviceController: DeviceController
+    private lateinit var torchController: TorchController
     private lateinit var lockController: LockController
     private lateinit var installedAppRepository: InstalledAppRepository
     private lateinit var appResolver: AppResolver
@@ -142,6 +129,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var wakeWordManager: WakeWordManager
     private val voiceSessionManager = VoiceSessionManager()
 
+    private var lastSpokenCommand: String = ""
+    private var currentExecutingAction: String = "Idle"
+    private var lastRecordedError: String = "None"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -152,6 +143,7 @@ class MainActivity : ComponentActivity() {
         settingsRepository = SettingsRepository(this)
 
         deviceController = DeviceController(this)
+        torchController = TorchController(this)
         lockController = LockController(this)
         installedAppRepository = InstalledAppRepository(this)
         appResolver = AppResolver(this, installedAppRepository)
@@ -178,15 +170,16 @@ class MainActivity : ComponentActivity() {
         actionPlanner = ActionPlanner(aiService)
 
         actionRouter = ActionRouter(
-            this,
-            sigmaRepository,
-            conversationDao,
-            appResolver,
-            deviceController,
-            lockController,
-            automationEngine,
-            actionPlanner,
-            visionService
+            context = this,
+            appResolver = appResolver,
+            deviceController = deviceController,
+            torchController = torchController,
+            screenAnalysisManager = screenAnalysisManager,
+            actionPlanner = actionPlanner,
+            automationEngine = automationEngine,
+            aiProvider = aiService,
+            repository = sigmaRepository,
+            conversationDao = conversationDao
         )
 
         wakeWordManager = WakeWordManager()
@@ -209,6 +202,7 @@ class MainActivity : ComponentActivity() {
                 voiceSessionManager.updateRms(rms)
             },
             onError = { err ->
+                lastRecordedError = err
                 voiceSessionManager.updateState(AssistantSessionState.ERROR)
             },
             onStateChange = { isListening ->
@@ -233,30 +227,36 @@ class MainActivity : ComponentActivity() {
         val query = if (isWake && command.isNotEmpty()) command else text
 
         activeSpeechText = query
+        lastSpokenCommand = query
+        currentExecutingAction = "Processing command: $query"
         voiceSessionManager.updateState(AssistantSessionState.THINKING)
 
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            val metrics = resources.displayMetrics
-            val result = actionRouter.executeCommand(query, this@MainActivity, metrics)
+            try {
+                val result = actionRouter.routeUserSpeech(query)
 
-            when (result) {
-                is RouterResult.Spoken -> {
-                    val speech = result.speechText.ifEmpty {
-                        val aiReply = aiService.generateText(query).getOrDefault("Done.")
-                        aiReply
+                when (result) {
+                    is RouterResult.Spoken -> {
+                        val speech = result.text.ifEmpty {
+                            val aiReply = aiService.generateText(query).getOrDefault("Done.")
+                            aiReply
+                        }
+                        activeResponseText = speech
+                        currentExecutingAction = result.actionType ?: "Spoken Response"
+                        voiceSessionManager.updateState(AssistantSessionState.SPEAKING)
+                        textToSpeechManager.speak(speech)
                     }
-                    activeResponseText = speech
-                    voiceSessionManager.updateState(AssistantSessionState.SPEAKING)
-                    textToSpeechManager.speak(speech)
+                    is RouterResult.NeedConfirmation -> {
+                        activeResponseText = result.description
+                        currentExecutingAction = "Awaiting Confirmation: ${result.actionType}"
+                        textToSpeechManager.speak("Confirmation needed: ${result.description}")
+                    }
                 }
-                is RouterResult.NeedConfirmation -> {
-                    activeResponseText = result.description
-                    textToSpeechManager.speak("Confirmation needed: ${result.description}")
-                }
-                is RouterResult.ContentPreview -> {
-                    activeResponseText = result.text
-                    textToSpeechManager.speak("Preview generated.")
-                }
+            } catch (e: Exception) {
+                lastRecordedError = e.message ?: "Unknown execution exception"
+                currentExecutingAction = "Error during execution"
+                activeResponseText = "An error occurred while processing the command."
+                voiceSessionManager.updateState(AssistantSessionState.ERROR)
             }
         }
     }
@@ -286,10 +286,11 @@ class MainActivity : ComponentActivity() {
         val projectionLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.StartActivityForResult()
         ) { result ->
-            val data = result.data
-            if (result.resultCode == RESULT_OK && data != null) {
-                projectionManager.handleActivityResult(result.resultCode, data)
-                Toast.makeText(this, "Screen capture initialized.", Toast.LENGTH_SHORT).show()
+            val granted = projectionManager.handleActivityResult(result.resultCode, result.data)
+            if (granted) {
+                Toast.makeText(this, "Screen capture active.", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Screen sharing permission cancelled.", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -329,6 +330,7 @@ class MainActivity : ComponentActivity() {
                             val bottomTabs = listOf(
                                 Triple("HOME", "Home", Icons.Default.Home),
                                 Triple("HISTORY", "History", Icons.Default.History),
+                                Triple("DIAGNOSTICS", "Diagnostics", Icons.Default.SmartToy),
                                 Triple("SETTINGS", "Settings", Icons.Default.Settings)
                             )
 
@@ -403,8 +405,12 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                     "SCREEN" -> {
-                                        val sysMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as AndroidMediaProjectionManager
-                                        projectionLauncher.launch(sysMgr.createScreenCaptureIntent())
+                                        val captureIntent = projectionManager.createScreenCaptureIntent()
+                                        if (captureIntent != null) {
+                                            projectionLauncher.launch(captureIntent)
+                                        } else {
+                                            Toast.makeText(this@MainActivity, "Screen capture unavailable", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                     "MORE" -> {
                                         scope.launch { drawerState.open() }
@@ -418,6 +424,12 @@ class MainActivity : ComponentActivity() {
                         "HISTORY" -> HistoryScreen(
                             conversationDao = conversationDao,
                             onClearHistory = { scope.launch { conversationDao.clearHistory() } }
+                        )
+                        "DIAGNOSTICS" -> DiagnosticsScreen(
+                            ttsManager = textToSpeechManager,
+                            lastCommand = lastSpokenCommand,
+                            currentAction = currentExecutingAction,
+                            lastError = lastRecordedError
                         )
                         "SETTINGS" -> SettingsScreen(
                             settingsRepository = settingsRepository,
@@ -453,6 +465,24 @@ class MainActivity : ComponentActivity() {
                                 })
                             }
                         )
+                        "SCREEN" -> {
+                            currentDestination = "AUTOMATION"
+                        }
+                        "CONTACTS" -> {
+                            val hasContacts = ContextCompat.checkSelfPermission(
+                                this@MainActivity,
+                                Manifest.permission.READ_CONTACTS
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (!hasContacts) {
+                                permissionLauncher.launch(arrayOf(Manifest.permission.READ_CONTACTS))
+                            } else {
+                                handleSpokenText("open contacts")
+                            }
+                            currentDestination = "HOME"
+                        }
+                        "APPS" -> {
+                            currentDestination = "AUTOMATION"
+                        }
                         "LOCKSCREEN" -> LockScreenView(
                             onUnlockRequest = {
                                 currentDestination = "HOME"
@@ -492,7 +522,7 @@ class MainActivity : ComponentActivity() {
                                         scope.launch {
                                             val res = act.onConfirm()
                                             if (res is RouterResult.Spoken) {
-                                                textToSpeechManager.speak(res.speechText)
+                                                textToSpeechManager.speak(res.text)
                                             }
                                         }
                                     },
@@ -518,5 +548,6 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         speechRecognitionManager.destroy()
         textToSpeechManager.shutdown()
+        projectionManager.release()
     }
 }

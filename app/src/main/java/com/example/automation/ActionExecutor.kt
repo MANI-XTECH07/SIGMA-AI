@@ -30,6 +30,30 @@ class ActionExecutor(
         }
     }
 
+    fun tapSearch(): ExecutionResult {
+        val service = SigmaAccessibilityService.instance
+            ?: return ExecutionResult.Failure("Accessibility Service inactive.")
+
+        val clicked = service.findAndClickSearch()
+        return if (clicked) {
+            ExecutionResult.Success("Tapped search interface.")
+        } else {
+            ExecutionResult.Failure("Could not locate search icon/bar.")
+        }
+    }
+
+    fun tapResult(query: String): ExecutionResult {
+        val service = SigmaAccessibilityService.instance
+            ?: return ExecutionResult.Failure("Accessibility Service inactive.")
+
+        val clicked = service.findAndClickResult(query)
+        return if (clicked) {
+            ExecutionResult.Success("Selected result for: $query")
+        } else {
+            ExecutionResult.Failure("Could not locate matching result for: $query")
+        }
+    }
+
     fun tapCoordinates(x: Float, y: Float): ExecutionResult {
         val service = SigmaAccessibilityService.instance
             ?: return ExecutionResult.Failure("Accessibility Service inactive.")
@@ -108,4 +132,3 @@ class ActionExecutor(
         }
     }
 }
-
