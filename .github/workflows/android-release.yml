@@ -61,4 +61,5 @@ jobs:
           path: |
             app/build/outputs/apk/**/*.apk
             app/build/outputs/bundle/**/*.aab
+          compression-level: 0
           if-no-files-found: warn

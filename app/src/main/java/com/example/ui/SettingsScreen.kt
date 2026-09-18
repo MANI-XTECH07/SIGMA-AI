@@ -75,6 +75,7 @@ import com.example.ui.theme.SigmaWhite
 fun SettingsScreen(
     settingsRepository: SettingsRepository,
     onBackgroundServiceToggled: (Boolean) -> Unit,
+    onTestVoice: (rate: Float, pitch: Float) -> Unit = { _, _ -> },
     onNavigateBack: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -238,6 +239,15 @@ fun SettingsScreen(
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
+
+                SigmaButton(
+                    text = "Test Voice Output",
+                    onClick = { onTestVoice(speechRate, speechPitch) },
+                    isPrimary = false,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),

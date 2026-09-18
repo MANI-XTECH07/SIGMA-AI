@@ -219,8 +219,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private var activeSpeechText = ""
-    private var activeResponseText = ""
+    private var activeSpeechText by mutableStateOf("")
+    private var activeResponseText by mutableStateOf("")
 
     private fun handleSpokenText(text: String) {
         val (isWake, command) = wakeWordManager.processSpokenText(text)
@@ -233,18 +233,24 @@ class MainActivity : ComponentActivity() {
 
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
             try {
+                // Ensure speech rate and pitch are updated from repository
+                textToSpeechManager.speechRate = settingsRepository.speechRate
+                textToSpeechManager.pitch = settingsRepository.speechPitch
+
                 val result = actionRouter.routeUserSpeech(query)
 
                 when (result) {
                     is RouterResult.Spoken -> {
-                        val speech = result.text.ifEmpty {
-                            val aiReply = aiService.generateText(query).getOrDefault("Done.")
-                            aiReply
+                        val speech = if (result.text.isNotEmpty()) {
+                            result.text
+                        } else {
+                            val aiReplyResult = aiService.generateText(query)
+                            aiReplyResult.getOrDefault("I have processed your request.")
                         }
                         activeResponseText = speech
                         currentExecutingAction = result.actionType ?: "Spoken Response"
                         voiceSessionManager.updateState(AssistantSessionState.SPEAKING)
-                        textToSpeechManager.speak(speech)
+                        textToSpeechManager.vocalizeGeminiResponse(speech)
                     }
                     is RouterResult.NeedConfirmation -> {
                         activeResponseText = result.description
@@ -436,6 +442,11 @@ class MainActivity : ComponentActivity() {
                             onBackgroundServiceToggled = { enabled ->
                                 if (enabled) SigmaVoiceService.start(this@MainActivity)
                                 else SigmaVoiceService.stop(this@MainActivity)
+                            },
+                            onTestVoice = { rate, pitch ->
+                                textToSpeechManager.speechRate = rate
+                                textToSpeechManager.pitch = pitch
+                                textToSpeechManager.vocalizeGeminiResponse("SIGMA AI voice synthesizer calibrated and online.")
                             },
                             onNavigateBack = { currentDestination = "HOME" }
                         )

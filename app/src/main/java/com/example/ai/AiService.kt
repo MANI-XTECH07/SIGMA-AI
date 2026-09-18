@@ -22,9 +22,9 @@ class AiService(
     companion object {
         private const val TAG = "AiService"
         private val MODELS = listOf(
-            "gemini-2.5-flash",
-            "gemini-1.5-flash",
-            "gemini-flash-latest"
+            "gemini-3.1-flash-lite-preview",
+            "gemini-flash-latest",
+            "gemini-3.5-flash"
         )
     }
 

@@ -53,4 +53,5 @@ jobs:
         with:
           name: sigma-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          compression-level: 0
           if-no-files-found: warn
