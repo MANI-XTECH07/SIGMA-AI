@@ -30,3 +30,16 @@ data class CommandHistoryItem(
     val shortResult: String
 )
 
+@Entity(tableName = "recorded_workflows")
+data class RecordedWorkflow(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val description: String = "",
+    val actionsJson: String, // JSON serialized List<WorkflowStep>
+    val targetPackage: String = "",
+    val targetHints: String = "",
+    val createdTime: Long = System.currentTimeMillis(),
+    val lastUsedTime: Long = System.currentTimeMillis(),
+    val runCount: Int = 0,
+    val isFavorite: Boolean = false
+)

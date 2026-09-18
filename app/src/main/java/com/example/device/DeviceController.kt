@@ -33,6 +33,40 @@ class DeviceController(private val context: Context) {
         }
     }
 
+    fun muteVolume(): Boolean {
+        return try {
+            audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to mute volume: ${e.message}")
+            false
+        }
+    }
+
+    fun unmuteVolume(): Boolean {
+        return try {
+            audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, AudioManager.FLAG_SHOW_UI)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unmute volume: ${e.message}")
+            false
+        }
+    }
+
+    fun dispatchMediaKeyEvent(keyCode: Int): Boolean {
+        return try {
+            val eventDown = android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode)
+            val eventUp = android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode)
+            audioManager?.dispatchMediaKeyEvent(eventDown)
+            audioManager?.dispatchMediaKeyEvent(eventUp)
+            Log.d(TAG, "Dispatched media key event: $keyCode")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to dispatch media key event: ${e.message}")
+            false
+        }
+    }
+
     fun setVolumePercentage(percent: Int): Boolean {
         return try {
             val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 100

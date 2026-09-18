@@ -1,6 +1,6 @@
 {
   "name": "SIGMA",
-  "description": "Android voice assistant powered by Gemini for voice commands, app control, and device actions.",
+  "description": "Production-grade Android AI automation engine with screen understanding, app-aware actions, teach-and-replay workflows, and voice control.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

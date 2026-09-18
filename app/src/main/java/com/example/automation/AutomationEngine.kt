@@ -1,5 +1,6 @@
 package com.example.automation
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.apps.AppResolutionResult
 import com.example.apps.AppResolver
@@ -9,6 +10,9 @@ import kotlinx.coroutines.delay
 
 enum class AutomationState {
     IDLE,
+    OBSERVE,
+    UNDERSTAND,
+    PLANNING,
     APP_OPEN,
     SEARCH_READY,
     QUERY_ENTERED,
@@ -18,15 +22,20 @@ enum class AutomationState {
     RESULT_SELECTED,
     PLAY_TRIGGERED,
     PLAYBACK_VERIFICATION,
-    SUCCESS,
+    VERIFY,
     RECOVER,
-    FAILED
+    SUCCESS,
+    FAILED,
+    CANCELLED
 }
 
 sealed class AutomationStep {
     data class LaunchApp(val appQuery: String) : AutomationStep()
+    data class WaitForPackage(val expectedPkg: String, val timeoutMs: Long = 4000L) : AutomationStep()
+    data class WaitForElement(val targetText: String, val timeoutMs: Long = 3500L) : AutomationStep()
     data class FindAndTapSearch(val fallbackHint: String = "Search") : AutomationStep()
     data class TypeText(val textToType: String) : AutomationStep()
+    data class ClearText(val dummy: Unit = Unit) : AutomationStep()
     data class SubmitSearch(val dummy: Unit = Unit) : AutomationStep()
     data class Wait(val durationMs: Long) : AutomationStep()
     data class ObserveScreen(val dummy: Unit = Unit) : AutomationStep()
@@ -36,31 +45,56 @@ sealed class AutomationStep {
     data class VerifyResultsDetected(val query: String = "") : AutomationStep()
     data class FindAndTapResult(val query: String) : AutomationStep()
     data class FindAndTap(val textToTap: String) : AutomationStep()
+    data class DoubleTap(val label: String? = null, val x: Float? = null, val y: Float? = null) : AutomationStep()
     data class Scroll(val forward: Boolean) : AutomationStep()
+    data class Swipe(val direction: String) : AutomationStep()
+    data class Drag(val startX: Float, val startY: Float, val endX: Float, val endY: Float) : AutomationStep()
+    data class LongPress(val targetText: String) : AutomationStep()
     data class LockDevice(val dummy: Unit = Unit) : AutomationStep()
     data class SearchWeb(val query: String) : AutomationStep()
     data class GoHome(val dummy: Unit = Unit) : AutomationStep()
     data class GoBack(val dummy: Unit = Unit) : AutomationStep()
+    data class OpenRecents(val dummy: Unit = Unit) : AutomationStep()
+    data class CloseApp(val dummy: Unit = Unit) : AutomationStep()
+    data class SetVolume(val percent: Int) : AutomationStep()
+    data class AdjustVolume(val up: Boolean) : AutomationStep()
+    data class SetMute(val mute: Boolean) : AutomationStep()
+    data class MediaControl(val action: MediaAction) : AutomationStep()
+    data class TakeScreenshot(val dummy: Unit = Unit) : AutomationStep()
 
     val actionName: String
         get() = when (this) {
             is LaunchApp -> "OPEN_APP (${appQuery})"
-            is FindAndTapSearch -> "SEARCH"
+            is WaitForPackage -> "WAIT_FOR_PACKAGE (${expectedPkg})"
+            is WaitForElement -> "WAIT_FOR_ELEMENT (${targetText})"
+            is FindAndTapSearch -> "TAP_SEARCH"
             is TypeText -> "TYPE (\"${textToType}\")"
+            is ClearText -> "CLEAR_TEXT"
             is SubmitSearch -> "SUBMIT"
             is Wait -> "WAIT (${durationMs}ms)"
             is ObserveScreen -> "OBSERVE_SCREEN"
             is SelectResult -> "SELECT_RESULT (\"${query}\")"
             is PlayMedia -> "PLAY"
-            is VerifyPlayback -> "VERIFY"
-            is VerifyResultsDetected -> "VERIFY_RESULTS"
+            is VerifyPlayback -> "VERIFY_PLAYBACK"
+            is VerifyResultsDetected -> "VERIFY_RESULTS (\"${query}\")"
             is FindAndTapResult -> "SELECT_RESULT (\"${query}\")"
             is FindAndTap -> "TAP (\"${textToTap}\")"
+            is DoubleTap -> "DOUBLE_TAP (${label ?: "($x, $y)"})"
             is Scroll -> "SCROLL (${if (forward) "DOWN" else "UP"})"
+            is Swipe -> "SWIPE (${direction})"
+            is Drag -> "DRAG (($startX,$startY)->($endX,$endY))"
+            is LongPress -> "LONG_PRESS (\"${targetText}\")"
             is LockDevice -> "LOCK_DEVICE"
             is SearchWeb -> "SEARCH_WEB (\"${query}\")"
             is GoHome -> "GO_HOME"
             is GoBack -> "GO_BACK"
+            is OpenRecents -> "RECENTS"
+            is CloseApp -> "CLOSE_APP"
+            is SetVolume -> "SET_VOLUME (${percent}%)"
+            is AdjustVolume -> "VOLUME_${if (up) "UP" else "DOWN"}"
+            is SetMute -> if (mute) "MUTE" else "UNMUTE"
+            is MediaControl -> "MEDIA_${action.name}"
+            is TakeScreenshot -> "SCREENSHOT"
         }
 }
 
@@ -78,7 +112,8 @@ data class PlanExecutionReport(
     val totalSteps: Int,
     val finalMessage: String,
     val state: AutomationState = AutomationState.SUCCESS,
-    val failedStep: AutomationStep? = null
+    val failedStep: AutomationStep? = null,
+    val durationMs: Long = 0L
 )
 
 /**
@@ -87,14 +122,36 @@ data class PlanExecutionReport(
 object AutomationDiagnostics {
     @Volatile var currentState: AutomationState = AutomationState.IDLE
     @Volatile var currentPackage: String = ""
+    @Volatile var currentActivity: String = ""
+    @Volatile var isAccessibilityConnected: Boolean = false
+    @Volatile var rootNodeAvailable: Boolean = false
+    @Volatile var activeNodeCount: Int = 0
     @Volatile var currentScreenSummary: String = ""
     @Volatile var lastAction: String = "None"
+    @Volatile var lastActionDurationMs: Long = 0L
     @Volatile var lastActionResult: String = "None"
     @Volatile var lastSelectedResult: String = ""
     @Volatile var isPlaybackVerified: Boolean = false
     @Volatile var recoveryAttempts: Int = 0
+    @Volatile var failureReason: String = "None"
+    @Volatile var aiLatencyMs: Long = 0L
+    @Volatile var totalCommandLatencyMs: Long = 0L
     @Volatile var lastCommand: String = ""
     @Volatile var parsedIntent: String = ""
+
+    fun updateNodeMetrics(service: SigmaAccessibilityService?) {
+        isAccessibilityConnected = service != null && SigmaAccessibilityService.isServiceRunning
+        val root = service?.getActiveRoot()
+        rootNodeAvailable = root != null
+        if (root != null) {
+            val nodes = service.dumpScreenNodes()
+            activeNodeCount = nodes.size
+        } else {
+            activeNodeCount = 0
+        }
+        currentPackage = SigmaAccessibilityService.currentPackage.ifEmpty { ForegroundAppTracker.currentPackageName }
+        currentActivity = ForegroundAppTracker.currentActivityName
+    }
 }
 
 class AutomationEngine(
@@ -128,28 +185,35 @@ class AutomationEngine(
         plan: AutomationPlan,
         onProgress: (String) -> Unit
     ): PlanExecutionReport {
+        val overallStart = SystemClock.elapsedRealtime()
         AutomationDiagnostics.lastCommand = plan.command.ifEmpty { plan.title }
         AutomationDiagnostics.parsedIntent = plan.intent
         AutomationDiagnostics.recoveryAttempts = 0
         AutomationDiagnostics.isPlaybackVerified = false
+        AutomationDiagnostics.failureReason = "None"
         currentState = AutomationState.IDLE
 
+        val service = SigmaAccessibilityService.instance
+        AutomationDiagnostics.updateNodeMetrics(service)
+
         Log.i(TAG, "==================================================")
+        Log.i(TAG, "STARTING AUTOMATION EXECUTION LOOP")
         Log.i(TAG, "COMMAND = ${AutomationDiagnostics.lastCommand}")
         Log.i(TAG, "PARSED INTENT = ${plan.intent}")
-        Log.i(TAG, "PLAN =")
+        Log.i(TAG, "PLAN = ${plan.steps.size} steps")
         for ((i, step) in plan.steps.withIndex()) {
             Log.i(TAG, "ACTION[${i + 1}] = ${step.actionName}")
         }
         Log.i(TAG, "==================================================")
 
-        // Section 3: Verify AccessibilityService is actually connected before executing UI actions.
+        // Check if Accessibility is connected for non-pure-app-launch steps
         val nonAccessibilitySteps = plan.steps.all { it is AutomationStep.LaunchApp || it is AutomationStep.Wait }
         if (!SigmaAccessibilityService.isServiceRunning && !nonAccessibilitySteps) {
             currentState = AutomationState.FAILED
             val errMsg = "Accessibility permission is required for screen control."
             Log.w(TAG, "SERVICE_CHECK_FAILED: $errMsg")
             AutomationDiagnostics.lastActionResult = "FAILED: Service not connected"
+            AutomationDiagnostics.failureReason = errMsg
             onProgress(errMsg)
             return PlanExecutionReport(
                 success = false,
@@ -157,23 +221,30 @@ class AutomationEngine(
                 totalSteps = plan.steps.size,
                 finalMessage = errMsg,
                 state = AutomationState.FAILED,
-                failedStep = plan.steps.firstOrNull()
+                failedStep = plan.steps.firstOrNull(),
+                durationMs = SystemClock.elapsedRealtime() - overallStart
             )
         }
 
+        // Execute sequential loop: OBSERVE -> UNDERSTAND -> PLAN -> ACT -> OBSERVE -> VERIFY -> RECOVER
         for ((index, step) in plan.steps.withIndex()) {
+            val stepStart = SystemClock.elapsedRealtime()
             val stepLabel = "ACTION[${index + 1}] = ${step.actionName}"
             AutomationDiagnostics.lastAction = step.actionName
-            AutomationDiagnostics.currentPackage = SigmaAccessibilityService.currentPackage
-            Log.i(TAG, "CURRENT_ACTION: $stepLabel | PACKAGE: ${AutomationDiagnostics.currentPackage}")
+            AutomationDiagnostics.currentPackage = SigmaAccessibilityService.currentPackage.ifEmpty { ForegroundAppTracker.currentPackageName }
+            AutomationDiagnostics.currentActivity = ForegroundAppTracker.currentActivityName
+
+            Log.i(TAG, "CURRENT_ACTION: $stepLabel | PKG: ${AutomationDiagnostics.currentPackage}")
             onProgress("Step ${index + 1}/${plan.steps.size}: ${step.actionName}")
 
             val stepSuccess = executeStep(step, plan, onProgress)
+            val stepDuration = SystemClock.elapsedRealtime() - stepStart
+            AutomationDiagnostics.lastActionDurationMs = stepDuration
 
             if (!stepSuccess) {
                 currentState = AutomationState.RECOVER
                 AutomationDiagnostics.recoveryAttempts++
-                Log.w(TAG, "ACTION_FAILED at step ${index + 1}: ${step.actionName}. Triggering Recovery...")
+                Log.w(TAG, "ACTION_FAILED at step ${index + 1}: ${step.actionName}. Triggering Self-Healing Recovery...")
                 onProgress("Recovering step ${index + 1}...")
 
                 val recovered = if (step is AutomationStep.SelectResult || step is AutomationStep.FindAndTapResult ||
@@ -191,19 +262,36 @@ class AutomationEngine(
                     val failureMsg = when (step) {
                         is AutomationStep.SelectResult, is AutomationStep.FindAndTapResult,
                         is AutomationStep.PlayMedia, is AutomationStep.VerifyPlayback ->
-                            "I found the result, but the app did not expose a playable control."
+                            "Found results, but could not trigger playback on the target item."
+                        is AutomationStep.FindAndTap -> "Target element '${step.textToTap}' was not found on screen."
+                        is AutomationStep.TypeText -> "Could not focus editable field to type text."
                         else -> "Failed at step ${index + 1}: ${step.actionName}"
                     }
                     AutomationDiagnostics.lastActionResult = "FAILED: $failureMsg"
+                    AutomationDiagnostics.failureReason = failureMsg
                     Log.e(TAG, "FINAL_RESULT: FAILED: $failureMsg")
                     onProgress(failureMsg)
+
+                    // Record context failure
+                    CommandContext.recordTurn(
+                        rawCommand = plan.command,
+                        intent = plan.intent,
+                        targetApp = AutomationDiagnostics.currentPackage,
+                        query = plan.query,
+                        success = false
+                    )
+
+                    val totalDuration = SystemClock.elapsedRealtime() - overallStart
+                    AutomationDiagnostics.totalCommandLatencyMs = totalDuration
+
                     return PlanExecutionReport(
                         success = false,
                         executedSteps = index,
                         totalSteps = plan.steps.size,
                         finalMessage = failureMsg,
                         state = AutomationState.FAILED,
-                        failedStep = step
+                        failedStep = step,
+                        durationMs = totalDuration
                     )
                 } else {
                     Log.i(TAG, "RECOVERY_SUCCEEDED at step ${index + 1}")
@@ -214,24 +302,39 @@ class AutomationEngine(
             }
 
             AutomationDiagnostics.lastActionResult = "SUCCESS"
-            delay(300L)
+            delay(150L)
         }
 
         currentState = AutomationState.SUCCESS
         val successMsg = when {
             plan.intent == "PLAY_MEDIA" -> "Playing."
             plan.intent == "SEARCH_ONLY" -> "Search completed for ${plan.query.ifEmpty { "query" }}."
+            plan.intent == "VOLUME" -> "Volume adjusted."
             else -> "Completed ${plan.title}"
         }
 
-        Log.i(TAG, "FINAL_RESULT: SUCCESS - $successMsg")
+        val totalDuration = SystemClock.elapsedRealtime() - overallStart
+        AutomationDiagnostics.totalCommandLatencyMs = totalDuration
+
+        // Record successful context turn
+        CommandContext.recordTurn(
+            rawCommand = plan.command,
+            intent = plan.intent,
+            targetApp = AutomationDiagnostics.currentPackage,
+            query = plan.query,
+            selectedItem = AutomationDiagnostics.lastSelectedResult,
+            success = true
+        )
+
+        Log.i(TAG, "FINAL_RESULT: SUCCESS - $successMsg (total: ${totalDuration}ms)")
         onProgress(successMsg)
         return PlanExecutionReport(
             success = true,
             executedSteps = plan.steps.size,
             totalSteps = plan.steps.size,
             finalMessage = successMsg,
-            state = AutomationState.SUCCESS
+            state = AutomationState.SUCCESS,
+            durationMs = totalDuration
         )
     }
 
@@ -252,10 +355,25 @@ class AutomationEngine(
                         res = appResolver.resolveAndLaunch(normalized)
                     }
                 }
-                delay(1200L)
+                delay(1000L)
                 val ok = res is AppResolutionResult.Success || res is AppResolutionResult.MultipleMatches
                 Log.d(TAG, "APP_OPEN LaunchApp(${step.appQuery}) = $ok, pkg=${SigmaAccessibilityService.currentPackage}")
                 ok
+            }
+
+            is AutomationStep.WaitForPackage -> {
+                val start = System.currentTimeMillis()
+                while (System.currentTimeMillis() - start < step.timeoutMs) {
+                    if (SigmaAccessibilityService.currentPackage.contains(step.expectedPkg, ignoreCase = true)) {
+                        return true
+                    }
+                    delay(200L)
+                }
+                false
+            }
+
+            is AutomationStep.WaitForElement -> {
+                screenObserver.waitForElement(step.targetText, timeoutMs = step.timeoutMs)
             }
 
             is AutomationStep.FindAndTapSearch -> {
@@ -267,7 +385,7 @@ class AutomationEngine(
                     if (res is ExecutionResult.Success) break
                     delay(300L)
                 }
-                delay(500L)
+                delay(400L)
                 val ok = res is ExecutionResult.Success
                 Log.d(TAG, "SEARCH_READY tapSearch = $ok")
                 ok
@@ -282,16 +400,21 @@ class AutomationEngine(
                     if (res is ExecutionResult.Success) break
                     delay(300L)
                 }
-                delay(400L)
+                delay(300L)
                 val ok = res is ExecutionResult.Success
                 Log.d(TAG, "QUERY_ENTERED typeText(\"${step.textToType}\") = $ok")
                 ok
             }
 
+            is AutomationStep.ClearText -> {
+                val res = actionExecutor.clearText()
+                res is ExecutionResult.Success
+            }
+
             is AutomationStep.SubmitSearch -> {
                 currentState = AutomationState.SEARCH_SUBMITTED
                 val res = actionExecutor.submitSearch()
-                delay(800L)
+                delay(600L)
                 val ok = res is ExecutionResult.Success
                 Log.d(TAG, "SEARCH_SUBMITTED submitSearch = $ok")
                 ok
@@ -304,12 +427,12 @@ class AutomationEngine(
             }
 
             is AutomationStep.ObserveScreen -> {
-                currentState = AutomationState.RESULTS_DETECTED
+                currentState = AutomationState.OBSERVE
                 val detected = actionVerifier.verifyResultsDetected(plan.query, timeoutMs = 2500L)
                 val nodes = service?.observeScreen() ?: emptyList()
                 AutomationDiagnostics.currentScreenSummary = "Screen contains ${nodes.size} nodes"
                 Log.i(TAG, "RESULTS_DETECTED = $detected (observed ${nodes.size} nodes)")
-                true // Allow next step (SelectResult) to attempt matching
+                true
             }
 
             is AutomationStep.VerifyResultsDetected -> {
@@ -327,7 +450,7 @@ class AutomationEngine(
                 while (System.currentTimeMillis() - start < 4000L) {
                     res = actionExecutor.selectResult(q)
                     if (res is ExecutionResult.Success) break
-                    delay(400L)
+                    delay(350L)
                 }
                 val ok = res is ExecutionResult.Success
                 if (ok) {
@@ -339,7 +462,7 @@ class AutomationEngine(
 
             is AutomationStep.PlayMedia -> {
                 currentState = AutomationState.PLAY_TRIGGERED
-                delay(600L)
+                delay(500L)
                 val res = actionExecutor.playMedia()
                 val ok = res is ExecutionResult.Success
                 Log.i(TAG, "PLAY_TRIGGERED = $ok")
@@ -359,8 +482,28 @@ class AutomationEngine(
                 res is ExecutionResult.Success
             }
 
+            is AutomationStep.DoubleTap -> {
+                val res = actionExecutor.doubleTap(step.label, step.x, step.y)
+                res is ExecutionResult.Success
+            }
+
             is AutomationStep.Scroll -> {
                 val res = actionExecutor.scroll(step.forward)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.Swipe -> {
+                val res = actionExecutor.swipeDirection(step.direction)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.Drag -> {
+                val res = actionExecutor.drag(step.startX, step.startY, step.endX, step.endY)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.LongPress -> {
+                val res = actionExecutor.longPressText(step.targetText)
                 res is ExecutionResult.Success
             }
 
@@ -382,6 +525,47 @@ class AutomationEngine(
             is AutomationStep.GoBack -> {
                 val res = actionExecutor.goBack()
                 res is ExecutionResult.Success
+            }
+
+            is AutomationStep.OpenRecents -> {
+                val res = actionExecutor.openRecents()
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.CloseApp -> {
+                val res = actionExecutor.closeCurrentApp()
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.SetVolume -> {
+                val res = actionExecutor.setVolume(step.percent)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.AdjustVolume -> {
+                val res = actionExecutor.adjustVolume(step.up)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.SetMute -> {
+                val res = actionExecutor.setMute(step.mute)
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.MediaControl -> {
+                val res = when (step.action) {
+                    MediaAction.PLAY -> actionExecutor.mediaPlay()
+                    MediaAction.PAUSE -> actionExecutor.mediaPause()
+                    MediaAction.NEXT -> actionExecutor.mediaNext()
+                    MediaAction.PREVIOUS -> actionExecutor.mediaPrevious()
+                    MediaAction.TOGGLE -> actionExecutor.mediaPlay()
+                }
+                res is ExecutionResult.Success
+            }
+
+            is AutomationStep.TakeScreenshot -> {
+                service?.takeScreenshotCompat { }
+                true
             }
         }
     }

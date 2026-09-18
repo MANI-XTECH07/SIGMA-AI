@@ -62,9 +62,13 @@ class SigmaAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event?.let {
             lastEventTime = System.currentTimeMillis()
-            it.packageName?.let { pkg ->
-                currentPackage = pkg.toString()
+            val pkg = it.packageName?.toString() ?: ""
+            val cls = it.className?.toString() ?: ""
+            if (pkg.isNotEmpty()) {
+                currentPackage = pkg
+                com.example.automation.ForegroundAppTracker.updateForeground(pkg, cls)
             }
+            com.example.automation.workflow.WorkflowRecorder.onAccessibilityEvent(it)
         }
     }
 
@@ -906,6 +910,34 @@ class SigmaAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Dispatches a swipe in the specified direction using dynamic screen metrics.
+     */
+    fun swipeDirection(
+        direction: String,
+        distanceFraction: Float = 0.5f,
+        durationMs: Long = 250
+    ): Boolean {
+        val dm = resources.displayMetrics
+        val width = dm.widthPixels.toFloat()
+        val height = dm.heightPixels.toFloat()
+        val cx = width * 0.5f
+        val cy = height * 0.5f
+        val deltaX = width * distanceFraction * 0.5f
+        val deltaY = height * distanceFraction * 0.5f
+
+        val (startX, startY, endX, endY) = when (direction.uppercase()) {
+            "UP" -> listOf(cx, cy + deltaY, cx, cy - deltaY)
+            "DOWN" -> listOf(cx, cy - deltaY, cx, cy + deltaY)
+            "LEFT" -> listOf(cx + deltaX, cy, cx - deltaX, cy)
+            "RIGHT" -> listOf(cx - deltaX, cy, cx + deltaX, cy)
+            else -> listOf(cx, cy + deltaY, cx, cy - deltaY)
+        }
+
+        Log.d(TAG, "SWIPE_DISPATCH: direction=$direction from ($startX, $startY) to ($endX, $endY)")
+        return performSwipeGesture(startX, startY, endX, endY, durationMs)
+    }
+
+    /**
      * Dispatches a non-empty tap gesture stroke to (x, y).
      * Adds lineTo(x, y + 1f) so StrokeDescription never receives an empty path.
      */
@@ -929,19 +961,284 @@ class SigmaAccessibilityService : AccessibilityService() {
         return false
     }
 
-    fun scrollForward(): Boolean {
-        val rootNode = getActiveRoot() ?: return false
-        return rootNode.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+    /**
+     * Dispatches a double-tap gesture to (x, y).
+     */
+    fun doubleTapCoordinates(x: Float, y: Float): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return try {
+                val path1 = Path().apply {
+                    moveTo(x, y)
+                    lineTo(x, y + 1f)
+                }
+                val path2 = Path().apply {
+                    moveTo(x, y)
+                    lineTo(x, y + 1f)
+                }
+                val stroke1 = GestureDescription.StrokeDescription(path1, 0, 70)
+                val stroke2 = GestureDescription.StrokeDescription(path2, 140, 70)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(stroke1)
+                    .addStroke(stroke2)
+                    .build()
+                val result = dispatchGesture(gesture, null, null)
+                Log.d(TAG, "GESTURE_DISPATCH double tap at ($x, $y) returned $result")
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to dispatch double tap gesture at ($x, $y): ${e.message}", e)
+                false
+            }
+        }
+        return false
     }
 
-    fun scrollBackward(): Boolean {
-        val rootNode = getActiveRoot() ?: return false
-        return rootNode.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+    /**
+     * Dispatches a drag/swipe gesture from (startX, startY) to (endX, endY) with configurable duration.
+     */
+    fun dragCoordinates(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 400L): Boolean {
+        return performSwipeGesture(startX, startY, endX, endY, durationMs)
     }
+
+    /**
+     * Clears text in the focused or first available editable field.
+     */
+    fun clearFocusedOrNodeText(node: AccessibilityNodeInfo? = null): Boolean {
+        val rootNode = getActiveRoot() ?: return false
+        val target = if (node != null && (node.isEditable || node.className?.toString()?.contains("EditText") == true)) {
+            node
+        } else {
+            rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditableNode(rootNode)
+        } ?: return false
+
+        target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        }
+        val success = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        Log.d(TAG, "CLEAR_TEXT success=$success")
+        return success
+    }
+
+    /**
+     * Builds a comprehensive lightweight snapshot of the current visible screen.
+     */
+    fun buildScreenSnapshot(): com.example.automation.ScreenSnapshot {
+        val rootNode = getActiveRoot()
+        val pkg = currentPackage
+        val act = com.example.automation.ForegroundAppTracker.currentActivityName
+        val now = System.currentTimeMillis()
+
+        if (rootNode == null) {
+            return com.example.automation.ScreenSnapshot(
+                timestamp = now,
+                packageName = pkg,
+                activityName = act,
+                summary = "No active accessibility root window."
+            )
+        }
+
+        val allElements = mutableListOf<com.example.automation.ScreenElement>()
+        val visibleTexts = mutableListOf<String>()
+        val clickableElements = mutableListOf<com.example.automation.ScreenElement>()
+        val editableFields = mutableListOf<com.example.automation.ScreenElement>()
+        val scrollableContainers = mutableListOf<com.example.automation.ScreenElement>()
+        var hasDialog = false
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null || node.isPassword) return
+
+            val text = node.text?.toString()?.trim() ?: ""
+            val desc = node.contentDescription?.toString()?.trim() ?: ""
+            val viewId = node.viewIdResourceName ?: ""
+            val cls = node.className?.toString() ?: ""
+
+            if (cls.contains("Dialog", ignoreCase = true) || cls.contains("AlertDialog", ignoreCase = true)) {
+                hasDialog = true
+            }
+
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+
+            val element = com.example.automation.ScreenElement(
+                text = text,
+                contentDescription = desc,
+                viewIdResourceName = viewId,
+                className = cls,
+                isClickable = node.isClickable,
+                isEditable = node.isEditable,
+                isScrollable = node.isScrollable,
+                isEnabled = node.isEnabled,
+                isChecked = node.isChecked,
+                isSelected = node.isSelected,
+                isFocused = node.isFocused,
+                bounds = bounds
+            )
+
+            allElements.add(element)
+
+            if (text.isNotBlank() && !visibleTexts.contains(text)) {
+                visibleTexts.add(text)
+            } else if (desc.isNotBlank() && !visibleTexts.contains(desc)) {
+                visibleTexts.add(desc)
+            }
+
+            if (node.isClickable) clickableElements.add(element)
+            if (node.isEditable) editableFields.add(element)
+            if (node.isScrollable) scrollableContainers.add(element)
+
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
+            }
+        }
+
+        traverse(rootNode)
+
+        val summary = "Screen pkg='$pkg' has ${visibleTexts.size} texts, ${clickableElements.size} clickables, ${editableFields.size} inputs."
+        return com.example.automation.ScreenSnapshot(
+            timestamp = now,
+            packageName = pkg,
+            activityName = act,
+            visibleTexts = visibleTexts,
+            clickableElements = clickableElements,
+            editableFields = editableFields,
+            scrollableContainers = scrollableContainers,
+            allElements = allElements,
+            hasDialog = hasDialog,
+            summary = summary
+        )
+    }
+
+    /**
+     * Dispatches a long press gesture stroke to (x, y) with 650ms hold duration.
+     */
+    fun longPressCoordinates(x: Float, y: Float, durationMs: Long = 650): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return try {
+                val path = Path().apply {
+                    moveTo(x, y)
+                    lineTo(x, y + 1f)
+                }
+                val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+                val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                val result = dispatchGesture(gesture, null, null)
+                Log.d(TAG, "GESTURE_DISPATCH long press at ($x, $y) returned $result")
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to dispatch long press gesture at ($x, $y): ${e.message}", e)
+                false
+            }
+        }
+        return false
+    }
+
+    /**
+     * Finds a node by text and performs a long press on it.
+     */
+    fun longPressByText(targetText: String): Boolean {
+        val rootNode = getActiveRoot() ?: return false
+        val matchedNodes = rootNode.findAccessibilityNodeInfosByText(targetText)
+        for (node in matchedNodes) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                val cx = rect.centerX().toFloat()
+                val cy = rect.centerY().toFloat()
+                val longPressed = longPressCoordinates(cx, cy)
+                if (longPressed) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Real dynamic scroll down (content moves up).
+     * 1. Attempts node ACTION_SCROLL_FORWARD.
+     * 2. Falls back to dynamic swipe gesture using display metrics.
+     */
+    fun scrollDownDynamic(): Boolean {
+        val rootNode = getActiveRoot()
+        if (rootNode != null) {
+            fun findScrollable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (node == null) return null
+                if (node.isScrollable) return node
+                for (i in 0 until node.childCount) {
+                    val res = findScrollable(node.getChild(i))
+                    if (res != null) return res
+                }
+                return null
+            }
+            val scrollable = findScrollable(rootNode)
+            if (scrollable != null && scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+                Log.d(TAG, "SCROLL_FORWARD performed on scrollable node")
+                return true
+            }
+        }
+
+        // Dynamic coordinate fallback
+        val dm = resources.displayMetrics
+        val width = dm.widthPixels.toFloat()
+        val height = dm.heightPixels.toFloat()
+        val cx = width * 0.5f
+        val startY = height * 0.72f
+        val endY = height * 0.28f
+        Log.d(TAG, "SCROLL_FORWARD dynamic gesture from ($cx, $startY) to ($cx, $endY)")
+        return performSwipeGesture(cx, startY, cx, endY, 280)
+    }
+
+    /**
+     * Real dynamic scroll up (content moves down).
+     * 1. Attempts node ACTION_SCROLL_BACKWARD.
+     * 2. Falls back to dynamic swipe gesture using display metrics.
+     */
+    fun scrollUpDynamic(): Boolean {
+        val rootNode = getActiveRoot()
+        if (rootNode != null) {
+            fun findScrollable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (node == null) return null
+                if (node.isScrollable) return node
+                for (i in 0 until node.childCount) {
+                    val res = findScrollable(node.getChild(i))
+                    if (res != null) return res
+                }
+                return null
+            }
+            val scrollable = findScrollable(rootNode)
+            if (scrollable != null && scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
+                Log.d(TAG, "SCROLL_BACKWARD performed on scrollable node")
+                return true
+            }
+        }
+
+        // Dynamic coordinate fallback
+        val dm = resources.displayMetrics
+        val width = dm.widthPixels.toFloat()
+        val height = dm.heightPixels.toFloat()
+        val cx = width * 0.5f
+        val startY = height * 0.28f
+        val endY = height * 0.72f
+        Log.d(TAG, "SCROLL_BACKWARD dynamic gesture from ($cx, $startY) to ($cx, $endY)")
+        return performSwipeGesture(cx, startY, cx, endY, 280)
+    }
+
+    fun scrollForward(): Boolean = scrollDownDynamic()
+
+    fun scrollBackward(): Boolean = scrollUpDynamic()
 
     fun goHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
 
     fun goBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
+
+    fun openRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
+
+    /**
+     * Closes the active app cleanly using supported Android navigation actions.
+     */
+    fun closeCurrentApp(): Boolean {
+        val prevPkg = currentPackage
+        val navigated = goHome()
+        Log.d(TAG, "CLOSE_APP: Navigated home from $prevPkg (result=$navigated)")
+        return navigated
+    }
 
     fun lockScreen(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

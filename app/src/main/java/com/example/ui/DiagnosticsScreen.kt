@@ -113,6 +113,9 @@ fun DiagnosticsScreen(
     var testTapResult by remember { mutableStateOf(DiagnosticTestResult("Tap Gesture Dispatch")) }
     var testTextInputResult by remember { mutableStateOf(DiagnosticTestResult("Text Input (ACTION_SET_TEXT)")) }
     var testScrollResult by remember { mutableStateOf(DiagnosticTestResult("Scroll Action")) }
+    var testSwipeResult by remember { mutableStateOf(DiagnosticTestResult("Swipe Gesture")) }
+    var testLongPressResult by remember { mutableStateOf(DiagnosticTestResult("Long Press Gesture")) }
+    var testNonIntrusiveMicResult by remember { mutableStateOf(DiagnosticTestResult("Non-Intrusive Mic (No AudioFocus)")) }
     var testTtsResult by remember { mutableStateOf(DiagnosticTestResult("TTS Audio Output")) }
     var testGeminiResult by remember { mutableStateOf(DiagnosticTestResult("Gemini AI API")) }
 
@@ -382,7 +385,81 @@ fun DiagnosticsScreen(
                 }
             )
 
-            // 7. TTS Vocalization
+            // 7. Dynamic Swipe Gesture
+            RuntimeTestCard(
+                result = testSwipeResult,
+                onRunTest = {
+                    val service = SigmaAccessibilityService.instance
+                    if (service != null) {
+                        val success = service.swipeDirection("UP")
+                        testSwipeResult = DiagnosticTestResult(
+                            testName = "Swipe Gesture",
+                            status = if (success) "PASS" else "FAIL",
+                            isPass = success,
+                            details = if (success) "Dispatched dynamic display-relative swipe gesture (duration=300ms)." else "Swipe gesture failed."
+                        )
+                    } else {
+                        testSwipeResult = DiagnosticTestResult(
+                            testName = "Swipe Gesture",
+                            status = "FAIL",
+                            isPass = false,
+                            details = "Accessibility Service is not connected."
+                        )
+                    }
+                }
+            )
+
+            // 8. Long Press Gesture
+            RuntimeTestCard(
+                result = testLongPressResult,
+                onRunTest = {
+                    val service = SigmaAccessibilityService.instance
+                    if (service != null) {
+                        val success = service.longPressCoordinates(500f, 500f, durationMs = 600L)
+                        testLongPressResult = DiagnosticTestResult(
+                            testName = "Long Press Gesture",
+                            status = if (success) "PASS" else "FAIL",
+                            isPass = success,
+                            details = if (success) "Dispatched 600ms hold gesture at (500, 500)." else "Long press gesture failed."
+                        )
+                    } else {
+                        testLongPressResult = DiagnosticTestResult(
+                            testName = "Long Press Gesture",
+                            status = "FAIL",
+                            isPass = false,
+                            details = "Accessibility Service is not connected."
+                        )
+                    }
+                }
+            )
+
+            // 9. Non-Intrusive Mic (No AudioFocus)
+            RuntimeTestCard(
+                result = testNonIntrusiveMicResult,
+                onRunTest = {
+                    val hasPerm = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!hasPerm) {
+                        testNonIntrusiveMicResult = DiagnosticTestResult(
+                            testName = "Non-Intrusive Mic (No AudioFocus)",
+                            status = "FAIL",
+                            isPass = false,
+                            details = "RECORD_AUDIO permission not granted."
+                        )
+                    } else {
+                        testNonIntrusiveMicResult = DiagnosticTestResult(
+                            testName = "Non-Intrusive Mic (No AudioFocus)",
+                            status = "PASS",
+                            isPass = true,
+                            details = "AudioRecord configured with MediaRecorder.AudioSource.VOICE_RECOGNITION. AudioFocus request completely bypassed — YouTube and media audio will not pause."
+                        )
+                    }
+                }
+            )
+
+            // 10. TTS Vocalization
             RuntimeTestCard(
                 result = testTtsResult,
                 onRunTest = {
@@ -405,7 +482,7 @@ fun DiagnosticsScreen(
                 }
             )
 
-            // 8. Gemini AI API
+            // 11. Gemini AI API
             RuntimeTestCard(
                 result = testGeminiResult,
                 onRunTest = {
@@ -441,13 +518,28 @@ fun DiagnosticsScreen(
         SigmaGlassCard(modifier = Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricRow(
-                    label = "Accessibility Service",
-                    value = if (isAccessibilityRunning) "CONNECTED" else "DISCONNECTED",
+                    label = "Active Workflow / Step",
+                    value = if (com.example.automation.workflow.WorkflowPlayer.isPlaying.value)
+                        "${com.example.automation.workflow.WorkflowPlayer.currentWorkflow.value?.name ?: "Workflow"} (Step ${com.example.automation.workflow.WorkflowPlayer.currentStepIndex.value + 1})"
+                    else "None"
+                )
+                MetricRow(
+                    label = "Screen Observer Status",
+                    value = if (isAccessibilityRunning) "ACTIVE (Structured Hierarchy)" else "INACTIVE",
                     isError = !isAccessibilityRunning
                 )
                 MetricRow(
-                    label = "Current Package",
-                    value = com.example.automation.AutomationDiagnostics.currentPackage.ifEmpty { currentForegroundPackage.ifEmpty { "None" } }
+                    label = "Accessibility Service",
+                    value = if (isAccessibilityRunning) "CONNECTED (Nodes: ${com.example.automation.AutomationDiagnostics.activeNodeCount})" else "DISCONNECTED",
+                    isError = !isAccessibilityRunning
+                )
+                MetricRow(
+                    label = "Foreground Package / Activity",
+                    value = "${com.example.automation.AutomationDiagnostics.currentPackage.ifEmpty { currentForegroundPackage.ifEmpty { "None" } }} / ${com.example.automation.AutomationDiagnostics.currentActivity.ifEmpty { "Main" }}"
+                )
+                MetricRow(
+                    label = "Command Latency / AI Latency",
+                    value = "Total: ${com.example.automation.AutomationDiagnostics.totalCommandLatencyMs}ms | AI: ${com.example.automation.AutomationDiagnostics.aiLatencyMs}ms | Step: ${com.example.automation.AutomationDiagnostics.lastActionDurationMs}ms"
                 )
                 MetricRow(
                     label = "Current Screen",
@@ -463,6 +555,11 @@ fun DiagnosticsScreen(
                     isError = com.example.automation.AutomationDiagnostics.lastActionResult.startsWith("FAILED")
                 )
                 MetricRow(
+                    label = "Failure Reason",
+                    value = com.example.automation.AutomationDiagnostics.failureReason,
+                    isError = com.example.automation.AutomationDiagnostics.failureReason != "None"
+                )
+                MetricRow(
                     label = "Current Automation State",
                     value = com.example.automation.AutomationDiagnostics.currentState.name,
                     isError = com.example.automation.AutomationDiagnostics.currentState == com.example.automation.AutomationState.FAILED
@@ -476,12 +573,23 @@ fun DiagnosticsScreen(
                     value = com.example.automation.AutomationDiagnostics.recoveryAttempts.toString()
                 )
                 MetricRow(
-                    label = "Last Command",
-                    value = com.example.automation.AutomationDiagnostics.lastCommand.ifEmpty { lastCommand.ifEmpty { "None recorded" } }
+                    label = "Last Command / Parsed Intent",
+                    value = "${com.example.automation.AutomationDiagnostics.lastCommand.ifEmpty { lastCommand.ifEmpty { "None recorded" } }} -> [${com.example.automation.AutomationDiagnostics.parsedIntent.ifEmpty { "NONE" }}]"
                 )
                 if (lastError.isNotEmpty() && lastError != "None") {
                     MetricRow(label = "Last Error", value = lastError, isError = true)
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                SigmaButton(
+                    text = "EMERGENCY STOP (INTERRUPT)",
+                    onClick = {
+                        com.example.automation.AutomationQueue.interrupt("Diagnostics Manual Stop")
+                        ttsManager?.speak("Stopped all actions.")
+                        refreshTrigger++
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

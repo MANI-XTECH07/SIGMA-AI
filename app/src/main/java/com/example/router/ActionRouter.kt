@@ -54,6 +54,85 @@ class ActionRouter(
         Log.i(TAG, "COMMAND_RECEIVED: \"$trimmed\"")
         Log.i(TAG, "TRANSCRIPT: \"$rawTranscript\"")
 
+        // 0. IMMEDIATE INTERRUPT CHECK
+        val classified = com.example.automation.CommandClassifier.classify(trimmed)
+        if (classified is com.example.automation.ClassifiedIntent.Interrupt) {
+            com.example.automation.AutomationQueue.interrupt("Voice command: ${classified.phrase}")
+            com.example.automation.workflow.WorkflowPlayer.stop()
+            logHistory(trimmed, true, "Stopped.")
+            return@withContext RouterResult.Spoken("Stopped.", "INTERRUPT")
+        }
+
+        // 0b. SCREEN UNDERSTANDING & READING: "Sigma, read this screen"
+        if (classified is com.example.automation.ClassifiedIntent.ReadScreen) {
+            val engine = com.example.automation.ScreenUnderstandingEngine()
+            val snapshot = engine.inspectScreen(SigmaAccessibilityService.instance)
+            val summary = engine.generateConciseSummary(snapshot)
+            logHistory(trimmed, true, summary)
+            return@withContext RouterResult.Spoken(summary, "SCREEN_READOUT")
+        }
+
+        // 0c. TEACH SIGMA / WORKFLOW RECORDING: "Sigma, learn this"
+        if (classified is com.example.automation.ClassifiedIntent.LearnWorkflow) {
+            com.example.automation.workflow.WorkflowRecorder.startRecording(classified.name)
+            val msg = "Recording started for \"${classified.name}\". Perform your actions on screen, and say \"Sigma, save workflow\" when finished."
+            logHistory(trimmed, true, msg)
+            return@withContext RouterResult.Spoken(msg, "WORKFLOW_LEARN")
+        }
+
+        // 0d. SAVE / STOP WORKFLOW RECORDING: "Sigma, save workflow"
+        if (classified is com.example.automation.ClassifiedIntent.StopRecordingWorkflow) {
+            val workflowName = com.example.automation.workflow.WorkflowRecorder.currentWorkflowName.value
+            val steps = com.example.automation.workflow.WorkflowRecorder.stopRecording()
+            if (steps.isEmpty()) {
+                val msg = "No actions were recorded during this session."
+                logHistory(trimmed, false, msg)
+                return@withContext RouterResult.Spoken(msg, "WORKFLOW_SAVE")
+            }
+            val repo = com.example.automation.workflow.WorkflowRepository(context)
+            repo.saveWorkflow(name = workflowName, steps = steps)
+            val msg = "Saved workflow \"$workflowName\" with ${steps.size} actions."
+            logHistory(trimmed, true, msg)
+            return@withContext RouterResult.Spoken(msg, "WORKFLOW_SAVE")
+        }
+
+        // 0e. REPLAY WORKFLOW: "Sigma run Daily YouTube"
+        if (classified is com.example.automation.ClassifiedIntent.RunWorkflow) {
+            val repo = com.example.automation.workflow.WorkflowRepository(context)
+            val workflow = repo.getWorkflowByName(classified.workflowName)
+            if (workflow == null) {
+                val msg = "I couldn't find a saved workflow named \"${classified.workflowName}\"."
+                logHistory(trimmed, false, msg)
+                return@withContext RouterResult.Spoken(msg, "WORKFLOW_RUN")
+            }
+            val report = com.example.automation.workflow.WorkflowPlayer.executeWorkflow(context, workflow)
+            logHistory(trimmed, report.success, report.message)
+            return@withContext RouterResult.Spoken(report.message, "WORKFLOW_RUN")
+        }
+
+        // 0f. SMART RESULT SELECTION: "first result", "open the result about Naruto"
+        if (classified is com.example.automation.ClassifiedIntent.SmartResultSelection) {
+            val service = SigmaAccessibilityService.instance
+            if (service == null) {
+                val msg = "Accessibility service is required for smart item selection."
+                logHistory(trimmed, false, msg)
+                return@withContext RouterResult.Spoken(msg, "SMART_SELECTION")
+            }
+            val engine = com.example.automation.ScreenUnderstandingEngine()
+            val snapshot = engine.inspectScreen(service)
+            val target = engine.resolveSmartResult(classified.query, snapshot)
+            if (target != null) {
+                val tapped = service.tapCoordinates(target.centerX, target.centerY)
+                val msg = if (tapped) "Opening ${target.displayLabel.take(30)}." else "Could not open target."
+                logHistory(trimmed, tapped, msg)
+                return@withContext RouterResult.Spoken(msg, "SMART_SELECTION")
+            } else {
+                val msg = "No matching item was found on the screen."
+                logHistory(trimmed, false, msg)
+                return@withContext RouterResult.Spoken(msg, "SMART_SELECTION")
+            }
+        }
+
         // 1. SCREEN VISION & ANALYSIS
         if (lower.contains("analyze screen") || lower.contains("what is on my screen") ||
             lower.contains("kya dikh raha hai") || lower.contains("screen dekho") ||
@@ -107,6 +186,35 @@ class ActionRouter(
             val msg = if (success) "Volume decreased." else "Volume adjusted."
             logHistory(trimmed, true, msg)
             return@withContext RouterResult.Spoken(msg, "VOLUME")
+        }
+
+        if (lower == "mute" || lower.contains("mute volume") || lower.contains("mute phone") || lower.contains("mute karo")) {
+            val success = deviceController.muteVolume()
+            val msg = if (success) "Volume muted." else "Could not mute volume."
+            logHistory(trimmed, success, msg)
+            return@withContext RouterResult.Spoken(msg, "VOLUME_MUTE")
+        }
+
+        if (lower == "unmute" || lower.contains("unmute volume") || lower.contains("unmute karo")) {
+            val success = deviceController.unmuteVolume()
+            val msg = if (success) "Volume unmuted." else "Could not unmute volume."
+            logHistory(trimmed, success, msg)
+            return@withContext RouterResult.Spoken(msg, "VOLUME_UNMUTE")
+        }
+
+        // Direct media next / previous
+        if (lower == "next" || lower == "next song" || lower == "next video" || lower == "agla gana" || lower == "agla video") {
+            val success = deviceController.dispatchMediaKeyEvent(android.view.KeyEvent.KEYCODE_MEDIA_NEXT)
+            val msg = if (success) "Skipped to next." else "Could not skip media."
+            logHistory(trimmed, success, msg)
+            return@withContext RouterResult.Spoken(msg, "MEDIA_NEXT")
+        }
+
+        if (lower == "previous" || lower == "previous song" || lower == "previous video" || lower == "pichla gana") {
+            val success = deviceController.dispatchMediaKeyEvent(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+            val msg = if (success) "Going to previous." else "Could not go to previous media."
+            logHistory(trimmed, success, msg)
+            return@withContext RouterResult.Spoken(msg, "MEDIA_PREVIOUS")
         }
 
         // 3. CALLING & CONTACTS (Confirmation required)

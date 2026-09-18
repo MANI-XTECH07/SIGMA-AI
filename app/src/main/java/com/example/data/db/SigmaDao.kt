@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -37,4 +38,26 @@ interface SigmaDao {
 
     @Query("DELETE FROM command_history")
     suspend fun clearHistory()
+
+    // WORKFLOW QUERIES
+    @Query("SELECT * FROM recorded_workflows ORDER BY isFavorite DESC, lastUsedTime DESC")
+    fun getAllWorkflows(): Flow<List<RecordedWorkflow>>
+
+    @Query("SELECT * FROM recorded_workflows WHERE id = :id LIMIT 1")
+    suspend fun getWorkflowById(id: Long): RecordedWorkflow?
+
+    @Query("SELECT * FROM recorded_workflows WHERE LOWER(name) = LOWER(:name) LIMIT 1")
+    suspend fun getWorkflowByName(name: String): RecordedWorkflow?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWorkflow(workflow: RecordedWorkflow): Long
+
+    @Update
+    suspend fun updateWorkflow(workflow: RecordedWorkflow)
+
+    @Query("DELETE FROM recorded_workflows WHERE id = :id")
+    suspend fun deleteWorkflow(id: Long)
+
+    @Query("UPDATE recorded_workflows SET lastUsedTime = :now, runCount = runCount + 1 WHERE id = :id")
+    suspend fun incrementWorkflowRun(id: Long, now: Long = System.currentTimeMillis())
 }

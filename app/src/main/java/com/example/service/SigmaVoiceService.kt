@@ -40,8 +40,12 @@ import com.example.router.ActionRouter
 import com.example.router.RouterResult
 import com.example.screen.ScreenAnalysisManager
 import com.example.voice.AssistantSessionState
+import com.example.voice.CallStateMonitor
+import com.example.voice.MicState
+import com.example.voice.MicStateManager
 import com.example.voice.SpeechRecognitionManager
 import com.example.voice.TextToSpeechManager
+import com.example.voice.WakeAudioDetector
 import com.example.voice.WakeWordManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +96,9 @@ class SigmaVoiceService : Service() {
         private val _activeCommand = MutableStateFlow("")
         val activeCommandFlow: StateFlow<String> = _activeCommand.asStateFlow()
 
+        private val micStateManager = MicStateManager()
+        val micStateFlow: StateFlow<MicState> = micStateManager.currentState
+
         var instance: SigmaVoiceService? = null
             private set
 
@@ -122,7 +129,7 @@ class SigmaVoiceService : Service() {
         }
 
         fun triggerListen(context: Context) {
-            instance?.startListeningInternal() ?: start(context)
+            instance?.triggerCommandListening() ?: start(context)
         }
     }
 
@@ -156,9 +163,12 @@ class SigmaVoiceService : Service() {
     private lateinit var wakeWordManager: WakeWordManager
     private lateinit var textToSpeechManager: TextToSpeechManager
     private var speechRecognitionManager: SpeechRecognitionManager? = null
+    private var wakeAudioDetector: WakeAudioDetector? = null
+    private var callStateMonitor: CallStateMonitor? = null
 
     private var isPaused = false
     private var restartListeningRunnable: Runnable? = null
+    private var commandListenTimeoutRunnable: Runnable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -176,7 +186,7 @@ class SigmaVoiceService : Service() {
                 "Sigma::BackgroundVoiceLock"
             ).apply {
                 setReferenceCounted(false)
-                acquire(12 * 60 * 60 * 1000L) // 12 hours max safety
+                acquire(12 * 60 * 60 * 1000L)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Could not acquire partial wake lock: ${e.message}")
@@ -246,9 +256,9 @@ class SigmaVoiceService : Service() {
             onSpeakingFinished = {
                 _isSpeaking.value = false
                 _sessionState.value = AssistantSessionState.ONLINE
-                // Resume listening loop after speaking
+                // Resume non-intrusive wake listening loop after speaking
                 if (!isPaused && _isServiceRunning.value) {
-                    scheduleRestartListening(400)
+                    scheduleRestartListening(300)
                 }
             }
         ).apply {
@@ -257,6 +267,50 @@ class SigmaVoiceService : Service() {
         }
 
         initSpeechRecognizer()
+        initWakeAudioDetector()
+        initCallStateMonitor()
+    }
+
+    private fun initCallStateMonitor() {
+        callStateMonitor = CallStateMonitor(this) { inCall ->
+            if (inCall) {
+                Log.i(TAG, "Call or VoIP active. Suspending microphone listening to protect call audio.")
+                micStateManager.transitionTo(MicState.MIC_SUSPENDED)
+                stopAllMicCapture()
+                _sessionState.value = AssistantSessionState.SLEEP
+            } else {
+                Log.i(TAG, "Call ended. Resuming background wake listening.")
+                micStateManager.transitionTo(MicState.MIC_IDLE)
+                if (!isPaused && _isServiceRunning.value) {
+                    scheduleRestartListening(500)
+                }
+            }
+        }
+        callStateMonitor?.start()
+    }
+
+    private fun initWakeAudioDetector() {
+        wakeAudioDetector?.stopListening()
+        wakeAudioDetector = WakeAudioDetector(
+            context = this,
+            onWakeWordDetected = {
+                Log.i(TAG, "WAKE_WORD_TRIGGERED: Transitioning from wake detection to command capture.")
+                triggerCommandListening()
+            },
+            onVoiceActivityDetected = {
+                // Voice energy detected
+            },
+            onRmsLevelChanged = { rms ->
+                _liveRms.value = rms
+            },
+            onError = { err ->
+                Log.w(TAG, "WakeAudioDetector error: $err")
+                micStateManager.transitionTo(MicState.MIC_ERROR, err)
+                if (!isPaused && _isServiceRunning.value && !_isSpeaking.value) {
+                    scheduleRestartListening(micStateManager.getBackoffDelayMs())
+                }
+            }
+        )
     }
 
     private fun initSpeechRecognizer() {
@@ -264,6 +318,7 @@ class SigmaVoiceService : Service() {
         speechRecognitionManager = SpeechRecognitionManager(
             context = this,
             onFinalTextRecognized = { text ->
+                cancelCommandTimeout()
                 handleIncomingSpokenText(text)
             },
             onPartialTranscript = { partial ->
@@ -273,11 +328,12 @@ class SigmaVoiceService : Service() {
                 _liveRms.value = rms
             },
             onError = { err ->
-                Log.d(TAG, "SpeechRec error in background: $err")
+                Log.d(TAG, "SpeechRec error/timeout: $err")
+                cancelCommandTimeout()
                 _isListening.value = false
+                // If speech recognizer failed or timed out, revert to non-intrusive wake listener
                 if (!isPaused && _isServiceRunning.value && !_isSpeaking.value) {
-                    // Automatically restart continuous listening
-                    scheduleRestartListening(500)
+                    scheduleRestartListening(400)
                 }
             },
             onStateChange = { listening ->
@@ -304,7 +360,7 @@ class SigmaVoiceService : Service() {
                 updateNotification()
             }
             ACTION_TRIGGER_LISTEN -> {
-                startListeningInternal()
+                triggerCommandListening()
             }
             else -> {
                 startForegroundWithNotification()
@@ -316,17 +372,63 @@ class SigmaVoiceService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Starts the non-intrusive background wake detector.
+     * YouTube, Spotify, and media playback remain completely unaffected.
+     */
     fun startListeningInternal() {
         if (isPaused) return
+        if (callStateMonitor?.isCallOrVoipActive() == true) {
+            micStateManager.transitionTo(MicState.MIC_SUSPENDED)
+            return
+        }
+
         mainHandler.post {
             cancelPendingRestart()
-            // If TTS is currently speaking and user speaks or requests listen, interrupt TTS immediately
+            if (_isSpeaking.value) return@post
+
+            speechRecognitionManager?.stopListening()
+            _isListening.value = false
+
+            val started = wakeAudioDetector?.startListening() ?: false
+            if (started) {
+                micStateManager.transitionTo(MicState.MIC_WAKE_LISTENING)
+                _sessionState.value = AssistantSessionState.ONLINE
+                Log.d(TAG, "Non-intrusive WakeAudioDetector active in background.")
+            }
+        }
+    }
+
+    /**
+     * Triggered either via acoustic wake word or user action button.
+     * Transitions from passive wake detection to active speech recognition.
+     */
+    fun triggerCommandListening() {
+        if (isPaused) return
+        if (callStateMonitor?.isCallOrVoipActive() == true) {
+            micStateManager.transitionTo(MicState.MIC_SUSPENDED)
+            return
+        }
+
+        mainHandler.post {
+            cancelPendingRestart()
+            // Stop TTS immediately if active
             if (_isSpeaking.value) {
                 textToSpeechManager.stop()
                 _isSpeaking.value = false
             }
+
+            // Stop passive AudioRecord before starting SpeechRecognizer
+            wakeAudioDetector?.stopListening()
+
+            micStateManager.transitionTo(MicState.MIC_COMMAND_LISTENING)
+            _sessionState.value = AssistantSessionState.LISTENING
+            _isListening.value = true
+
             try {
                 speechRecognitionManager?.startListening()
+                // Set safety timeout of 7 seconds for command listening
+                startCommandTimeout(7000L)
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting speech recognition: ${e.message}")
                 scheduleRestartListening(1000)
@@ -334,17 +436,44 @@ class SigmaVoiceService : Service() {
         }
     }
 
+    private fun startCommandTimeout(timeoutMs: Long) {
+        cancelCommandTimeout()
+        commandListenTimeoutRunnable = Runnable {
+            Log.d(TAG, "Command listening timed out, resuming passive wake listener")
+            speechRecognitionManager?.stopListening()
+            _isListening.value = false
+            if (!isPaused && _isServiceRunning.value && !_isSpeaking.value) {
+                startListeningInternal()
+            }
+        }
+        mainHandler.postDelayed(commandListenTimeoutRunnable!!, timeoutMs)
+    }
+
+    private fun cancelCommandTimeout() {
+        commandListenTimeoutRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            commandListenTimeoutRunnable = null
+        }
+    }
+
     fun stopListeningInternal() {
         mainHandler.post {
             cancelPendingRestart()
-            speechRecognitionManager?.stopListening()
-            _isListening.value = false
+            cancelCommandTimeout()
+            stopAllMicCapture()
         }
+    }
+
+    private fun stopAllMicCapture() {
+        wakeAudioDetector?.stopListening()
+        speechRecognitionManager?.stopListening()
+        _isListening.value = false
     }
 
     fun pauseListening() {
         isPaused = true
         stopListeningInternal()
+        micStateManager.transitionTo(MicState.MIC_IDLE)
         _sessionState.value = AssistantSessionState.SLEEP
     }
 
@@ -559,7 +688,8 @@ class SigmaVoiceService : Service() {
         _isListening.value = false
         _isSpeaking.value = false
         cancelPendingRestart()
-        stopListeningInternal()
+        cancelCommandTimeout()
+        stopAllMicCapture()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -589,6 +719,9 @@ class SigmaVoiceService : Service() {
         instance = null
         _isServiceRunning.value = false
         cancelPendingRestart()
+        cancelCommandTimeout()
+        callStateMonitor?.stop()
+        wakeAudioDetector?.stopListening()
         speechRecognitionManager?.destroy()
         textToSpeechManager.shutdown()
         releaseWakeLock()

@@ -87,6 +87,7 @@ import com.example.ui.ScreenAnalyzerScreen
 import com.example.ui.SettingsScreen
 import com.example.ui.SidebarDrawer
 import com.example.ui.SplashScreen
+import com.example.ui.WorkflowScreen
 import com.example.ui.theme.SigmaNeonRed
 import com.example.ui.theme.SigmaNeonRedBright
 import com.example.ui.theme.SigmaSurfaceBlack
@@ -103,6 +104,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var sigmaRepository: SigmaRepository
+    private lateinit var workflowRepository: com.example.automation.workflow.WorkflowRepository
     private lateinit var conversationDao: ConversationDao
 
     private lateinit var deviceController: DeviceController
@@ -142,6 +144,7 @@ class MainActivity : ComponentActivity() {
 
         val db = SigmaDatabase.getInstance(this)
         sigmaRepository = SigmaRepository(db.sigmaDao())
+        workflowRepository = com.example.automation.workflow.WorkflowRepository(this)
         conversationDao = ConversationDao(db.sigmaDao())
         settingsRepository = SettingsRepository(this)
 
@@ -461,6 +464,10 @@ class MainActivity : ComponentActivity() {
                         "HISTORY" -> HistoryScreen(
                             conversationDao = conversationDao,
                             onClearHistory = { scope.launch { conversationDao.clearHistory() } }
+                        )
+                        "WORKFLOWS" -> WorkflowScreen(
+                            repository = workflowRepository,
+                            onNavigateBack = { currentDestination = "HOME" }
                         )
                         "DIAGNOSTICS" -> DiagnosticsScreen(
                             ttsManager = textToSpeechManager,
