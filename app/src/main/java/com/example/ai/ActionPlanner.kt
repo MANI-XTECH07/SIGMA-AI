@@ -11,7 +11,97 @@ class ActionPlanner(private val aiProvider: AiProvider) {
     suspend fun planUserCommand(rawCommand: String, screenContext: String? = null): AutomationPlan {
         val lower = rawCommand.lowercase().trim()
 
-        // 1. Fast path for direct Android actions:
+        // 1. Chained Search & Play commands: e.g. "Open YouTube, search for Naruto AMV and play it"
+        if (lower.contains("youtube") && (lower.contains("search") || lower.contains("play"))) {
+            val query = when {
+                lower.contains("search for") -> lower.substringAfter("search for")
+                lower.contains("search") -> lower.substringAfter("search")
+                lower.contains("play") -> lower.substringAfter("play")
+                else -> ""
+            }
+            val cleanQuery = query
+                .substringBefore("and play")
+                .substringBefore("aur play")
+                .replace("karo", "")
+                .replace("aur", "")
+                .replace("and", "")
+                .replace("it", "")
+                .replace(",", "")
+                .replace("the first result", "")
+                .replace("the first matching result", "")
+                .trim()
+                .ifEmpty { "Trending" }
+
+            return AutomationPlan(
+                title = "YouTube Search & Play",
+                steps = listOf(
+                    AutomationStep.LaunchApp("YouTube"),
+                    AutomationStep.Wait(1200L),
+                    AutomationStep.FindAndTap("Search"),
+                    AutomationStep.TypeText(cleanQuery),
+                    AutomationStep.Wait(1500L),
+                    AutomationStep.FindAndTap(cleanQuery)
+                )
+            )
+        }
+
+        // Chained Settings sub-screen navigation: e.g. "Go to settings and open Wi-Fi"
+        if (lower.contains("settings") && (lower.contains("wi-fi") || lower.contains("wifi") || lower.contains("bluetooth") || lower.contains("display") || lower.contains("sound") || lower.contains("battery"))) {
+            val subSection = when {
+                lower.contains("wi-fi") || lower.contains("wifi") -> "Wi-Fi"
+                lower.contains("bluetooth") -> "Bluetooth"
+                lower.contains("display") -> "Display"
+                lower.contains("sound") -> "Sound"
+                lower.contains("battery") -> "Battery"
+                else -> "Wi-Fi"
+            }
+            return AutomationPlan(
+                title = "Open Settings > $subSection",
+                steps = listOf(
+                    AutomationStep.LaunchApp("Settings"),
+                    AutomationStep.Wait(1000L),
+                    AutomationStep.FindAndTap(subSection)
+                )
+            )
+        }
+
+        // Chained Tap & Type: e.g. "Tap search box and type Naruto"
+        if (lower.contains("tap") && (lower.contains("type") || lower.contains("write") || lower.contains("enter"))) {
+            val tapTarget = lower.substringAfter("tap")
+                .substringBefore("and")
+                .replace("the", "")
+                .replace("button", "")
+                .replace(",", "")
+                .trim()
+            val typeKeyword = when {
+                lower.contains("type") -> "type"
+                lower.contains("write") -> "write"
+                lower.contains("enter") -> "enter"
+                else -> ""
+            }
+            val textToType = if (typeKeyword.isNotEmpty()) {
+                val idx = rawCommand.indexOf(typeKeyword, ignoreCase = true)
+                if (idx != -1) {
+                    rawCommand.substring(idx + typeKeyword.length)
+                        .replace("karo", "", ignoreCase = true)
+                        .replace(",", "")
+                        .trim()
+                } else ""
+            } else ""
+
+            if (tapTarget.isNotEmpty() && textToType.isNotEmpty()) {
+                return AutomationPlan(
+                    title = "Tap & Type",
+                    steps = listOf(
+                        AutomationStep.FindAndTap(tapTarget),
+                        AutomationStep.Wait(500L),
+                        AutomationStep.TypeText(textToType)
+                    )
+                )
+            }
+        }
+
+        // 2. Direct Single Actions:
         // Real Device Lock
         if (lower.contains("phone lock") || lower.contains("lock karo") || lower.contains("lock phone")) {
             return AutomationPlan(
@@ -35,7 +125,7 @@ class ActionPlanner(private val aiProvider: AiProvider) {
         }
 
         // Tap button
-        if (lower.contains("tap karo") || lower.contains("click karo") || lower.contains("tap ")) {
+        if (lower.contains("tap karo") || lower.contains("click karo") || lower.contains("tap ") || lower.contains("click ")) {
             val target = lower.replace("sigma", "")
                 .replace("tap karo", "")
                 .replace("click karo", "")
@@ -43,6 +133,7 @@ class ActionPlanner(private val aiProvider: AiProvider) {
                 .replace("click", "")
                 .replace("ko", "")
                 .replace("button", "")
+                .replace(",", "")
                 .trim()
             if (target.isNotEmpty()) {
                 return AutomationPlan(
@@ -50,24 +141,6 @@ class ActionPlanner(private val aiProvider: AiProvider) {
                     steps = listOf(AutomationStep.FindAndTap(target))
                 )
             }
-        }
-
-        // 2. Chained Search & Play commands: e.g. "YouTube kholo aur Naruto AMV search karo"
-        if (lower.contains("youtube") && (lower.contains("search") || lower.contains("play"))) {
-            val query = lower.substringAfter("search")
-                .substringAfter("play")
-                .replace("karo", "")
-                .replace("aur", "")
-                .trim()
-            return AutomationPlan(
-                title = "YouTube Search",
-                steps = listOf(
-                    AutomationStep.LaunchApp("YouTube"),
-                    AutomationStep.Wait(1200L),
-                    AutomationStep.FindAndTap("Search"),
-                    AutomationStep.TypeText(query.ifEmpty { "Naruto AMV" })
-                )
-            )
         }
 
         // Direct App Launch: "YouTube kholo", "Chrome open karo", "WhatsApp kholo"

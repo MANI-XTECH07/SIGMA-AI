@@ -202,7 +202,7 @@ class MainActivity : ComponentActivity() {
 
         speechRecognitionManager = SpeechRecognitionManager(
             context = this,
-            onTextRecognized = { text ->
+            onFinalTextRecognized = { text ->
                 handleSpokenText(text)
             },
             onRmsChanged = { rms ->

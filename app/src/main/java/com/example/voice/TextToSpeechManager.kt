@@ -1,6 +1,8 @@
 package com.example.voice
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -17,6 +19,7 @@ class TextToSpeechManager(
         private const val TAG = "TextToSpeechManager"
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
     var isReady: Boolean = false
         private set
@@ -24,27 +27,36 @@ class TextToSpeechManager(
         private set
 
     var speechRate: Float = 1.05f
-    var pitch: Float = 0.95f // Slightly deeper for natural male tone
+        set(value) {
+            field = value
+            tts?.setSpeechRate(value)
+        }
+
+    var pitch: Float = 0.85f // Calibrated for deep, masculine SIGMA tone
+        set(value) {
+            field = value
+            tts?.setPitch(value)
+        }
 
     init {
-        tts = TextToSpeech(context) { status ->
+        tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 isReady = true
                 configureVoice()
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
                         isSpeaking = true
-                        onSpeakingStarted()
+                        mainHandler.post { onSpeakingStarted() }
                     }
 
                     override fun onDone(utteranceId: String?) {
                         isSpeaking = false
-                        onSpeakingFinished()
+                        mainHandler.post { onSpeakingFinished() }
                     }
 
                     override fun onError(utteranceId: String?) {
                         isSpeaking = false
-                        onSpeakingFinished()
+                        mainHandler.post { onSpeakingFinished() }
                     }
                 })
                 Log.d(TAG, "TTS initialized successfully")
@@ -63,14 +75,33 @@ class TextToSpeechManager(
             // Select natural male voice if available in system voices
             try {
                 val voices = engine.voices
-                val maleVoice = voices?.firstOrNull { voice ->
-                    val name = voice.name.lowercase()
-                    (name.contains("male") || name.contains("en-us-x-sfg") || name.contains("en-in-x-cpc")) &&
-                            !voice.isNetworkConnectionRequired
-                }
-                if (maleVoice != null) {
-                    engine.voice = maleVoice
-                    Log.d(TAG, "Selected male voice: ${maleVoice.name}")
+                if (voices != null && voices.isNotEmpty()) {
+                    // Look for known male identifiers across Google TTS, Samsung TTS, and AOSP
+                    val maleVoice = voices.firstOrNull { voice ->
+                        val name = voice.name.lowercase(Locale.ROOT)
+                        val locale = voice.locale
+                        val isEnglish = locale.language.startsWith("en") || locale.language.startsWith("hi")
+                        val isMale = name.contains("male") ||
+                                name.contains("#male") ||
+                                name.contains("-x-sfg") ||
+                                name.contains("-x-iom") ||
+                                name.contains("-x-cpc") ||
+                                name.contains("-x-ahp") ||
+                                name.contains("-x-rjs") ||
+                                name.contains("en-us-x-sfg#male_1") ||
+                                name.contains("en-in-x-cxx#male_1")
+                        isEnglish && isMale && !voice.isNetworkConnectionRequired
+                    } ?: voices.firstOrNull { voice ->
+                        val name = voice.name.lowercase(Locale.ROOT)
+                        name.contains("male")
+                    }
+
+                    if (maleVoice != null) {
+                        engine.voice = maleVoice
+                        Log.d(TAG, "Selected male voice: ${maleVoice.name}")
+                    } else {
+                        Log.d(TAG, "No explicit male voice identifier found, applying deep pitch calibration ($pitch)")
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Could not inspect voices: ${e.message}")
@@ -81,7 +112,6 @@ class TextToSpeechManager(
     fun speak(text: String, flushQueue: Boolean = true) {
         if (!isReady || text.isBlank()) return
 
-        // Short crisp response enforcement
         val cleanText = formatCrispResponse(text)
         val queueMode = if (flushQueue) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
         tts?.speak(cleanText, queueMode, null, "SIGMA_UTTERANCE_${System.currentTimeMillis()}")
@@ -93,7 +123,7 @@ class TextToSpeechManager(
                 tts?.stop()
             }
             isSpeaking = false
-            onSpeakingFinished()
+            mainHandler.post { onSpeakingFinished() }
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping TTS: ${e.message}")
         }
@@ -106,13 +136,13 @@ class TextToSpeechManager(
         isReady = false
     }
 
-    /**
-     * Ensures SIGMA speaks crisp, executive voice feedback without narrating internal logs.
-     */
     private fun formatCrispResponse(raw: String): String {
         return raw.trim()
             .replace("**", "")
             .replace("*", "")
-            .take(180)
+            .replace("`", "")
+            .replace("#", "")
+            .take(240)
     }
 }
+

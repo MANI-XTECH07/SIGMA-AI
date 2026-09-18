@@ -24,9 +24,21 @@ class ActionExecutor(
 
         val clicked = service.clickByText(label)
         return if (clicked) {
-            ExecutionResult.Success("Tapped element with text: $label")
+            ExecutionResult.Success("Tapped element: $label")
         } else {
             ExecutionResult.Failure("Could not find or tap element: $label")
+        }
+    }
+
+    fun tapCoordinates(x: Float, y: Float): ExecutionResult {
+        val service = SigmaAccessibilityService.instance
+            ?: return ExecutionResult.Failure("Accessibility Service inactive.")
+
+        val tapped = service.tapCoordinates(x, y)
+        return if (tapped) {
+            ExecutionResult.Success("Tapped coordinates ($x, $y)")
+        } else {
+            ExecutionResult.Failure("Failed to dispatch tap gesture at ($x, $y)")
         }
     }
 
@@ -38,7 +50,7 @@ class ActionExecutor(
         return if (typed) {
             ExecutionResult.Success("Typed text: $text")
         } else {
-            ExecutionResult.Failure("No focused editable text field found to type into.")
+            ExecutionResult.Failure("No editable text field found to type into.")
         }
     }
 
@@ -83,6 +95,11 @@ class ActionExecutor(
     }
 
     fun lockDevice(): ExecutionResult {
+        val service = SigmaAccessibilityService.instance
+        if (service != null && service.lockDevice()) {
+            return ExecutionResult.Success("Device locked successfully via Accessibility.")
+        }
+
         val locked = lockController.lockPhone()
         return if (locked) {
             ExecutionResult.Success("Device locked successfully.")
@@ -91,3 +108,4 @@ class ActionExecutor(
         }
     }
 }
+
