@@ -19,7 +19,7 @@ abstract class SigmaDatabase : RoomDatabase() {
                     context.applicationContext,
                     SigmaDatabase::class.java,
                     "sigma_database"
-                ).fallbackToDestructiveMigration().build()
+                ).fallbackToDestructiveMigration(true).build()
                 INSTANCE = instance
                 instance
             }

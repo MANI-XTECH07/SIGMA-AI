@@ -17,13 +17,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ScreenShare
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.ScreenShare
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -106,7 +106,7 @@ fun PermissionScreen(
             SigmaPermissionCard(
                 title = "SCREEN VISION",
                 description = "Enables real visual screen capture analysis via MediaProjection.",
-                icon = Icons.Default.ScreenShare,
+                icon = Icons.AutoMirrored.Filled.ScreenShare,
                 status = PermissionCardStatus.READY,
                 onActionClick = onRequestScreenCapture
             )
@@ -138,7 +138,7 @@ fun PermissionScreen(
             SigmaPermissionCard(
                 title = "BACKGROUND ASSISTANT",
                 description = "Keeps voice listener active in background for \"Hey Sigma\" wake commands.",
-                icon = Icons.Default.VolumeUp,
+                icon = Icons.AutoMirrored.Filled.VolumeUp,
                 status = if (isBackgroundActive) PermissionCardStatus.READY else PermissionCardStatus.DISABLED,
                 onActionClick = {
                     if (isBackgroundActive) {

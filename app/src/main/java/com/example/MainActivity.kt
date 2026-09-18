@@ -75,12 +75,15 @@ import com.example.screen.ScreenAnalysisManager
 import com.example.screen.ScreenCaptureManager
 import com.example.service.SigmaAccessibilityService
 import com.example.service.SigmaVoiceService
+import com.example.ui.AppControlScreen
 import com.example.ui.AutomationScreen
+import com.example.ui.ContactsScreen
 import com.example.ui.DiagnosticsScreen
 import com.example.ui.HistoryScreen
 import com.example.ui.LockScreenView
 import com.example.ui.MainScreen
 import com.example.ui.PermissionScreen
+import com.example.ui.ScreenAnalyzerScreen
 import com.example.ui.SettingsScreen
 import com.example.ui.SidebarDrawer
 import com.example.ui.SplashScreen
@@ -397,7 +400,7 @@ class MainActivity : ComponentActivity() {
                             onQuickActionClick = { action ->
                                 when (action) {
                                     "APPS" -> {
-                                        currentDestination = "AUTOMATION"
+                                        currentDestination = "APPS"
                                     }
                                     "CONTACTS" -> {
                                         val hasContacts = ContextCompat.checkSelfPermission(
@@ -407,16 +410,11 @@ class MainActivity : ComponentActivity() {
                                         if (!hasContacts) {
                                             permissionLauncher.launch(arrayOf(Manifest.permission.READ_CONTACTS))
                                         } else {
-                                            handleSpokenText("open contacts")
+                                            currentDestination = "CONTACTS"
                                         }
                                     }
                                     "SCREEN" -> {
-                                        val captureIntent = projectionManager.createScreenCaptureIntent()
-                                        if (captureIntent != null) {
-                                            projectionLauncher.launch(captureIntent)
-                                        } else {
-                                            Toast.makeText(this@MainActivity, "Screen capture unavailable", Toast.LENGTH_SHORT).show()
-                                        }
+                                        currentDestination = "SCREEN"
                                     }
                                     "MORE" -> {
                                         scope.launch { drawerState.open() }
@@ -464,8 +462,8 @@ class MainActivity : ComponentActivity() {
                                         "SCROLL_DOWN" -> actionExecutor.scroll(true)
                                         "SCROLL_UP" -> actionExecutor.scroll(false)
                                         "LOCK_PHONE" -> {
-                                            currentDestination = "LOCKSCREEN"
-                                            actionExecutor.lockDevice()
+                                             currentDestination = "LOCKSCREEN"
+                                             actionExecutor.lockDevice()
                                         }
                                     }
                                 }
@@ -476,24 +474,46 @@ class MainActivity : ComponentActivity() {
                                 })
                             }
                         )
-                        "SCREEN" -> {
-                            currentDestination = "AUTOMATION"
-                        }
-                        "CONTACTS" -> {
-                            val hasContacts = ContextCompat.checkSelfPermission(
-                                this@MainActivity,
-                                Manifest.permission.READ_CONTACTS
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (!hasContacts) {
-                                permissionLauncher.launch(arrayOf(Manifest.permission.READ_CONTACTS))
-                            } else {
-                                handleSpokenText("open contacts")
-                            }
-                            currentDestination = "HOME"
-                        }
-                        "APPS" -> {
-                            currentDestination = "AUTOMATION"
-                        }
+                        "SCREEN" -> ScreenAnalyzerScreen(
+                            screenAnalysisManager = screenAnalysisManager,
+                            onStartMediaProjection = {
+                                val captureIntent = projectionManager.createScreenCaptureIntent()
+                                if (captureIntent != null) {
+                                    projectionLauncher.launch(captureIntent)
+                                } else {
+                                    Toast.makeText(this@MainActivity, "Screen capture unavailable", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onAskAiAboutScreen = { summaryText ->
+                                handleSpokenText("Analyze screen: $summaryText")
+                            },
+                            onNavigateBack = { currentDestination = "HOME" }
+                        )
+                        "CONTACTS" -> ContactsScreen(
+                            deviceController = deviceController,
+                            onCallContact = { phone ->
+                                val hasCall = ContextCompat.checkSelfPermission(
+                                    this@MainActivity,
+                                    Manifest.permission.CALL_PHONE
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasCall) {
+                                    permissionLauncher.launch(arrayOf(Manifest.permission.CALL_PHONE))
+                                } else {
+                                    deviceController.initiateCall(phone, directCall = false)
+                                }
+                            },
+                            onSmsContact = { phone ->
+                                deviceController.sendSms(phone, "")
+                            },
+                            onNavigateBack = { currentDestination = "HOME" }
+                        )
+                        "APPS" -> AppControlScreen(
+                            appRepository = installedAppRepository,
+                            onLaunchApp = { pkg ->
+                                appResolver.launchApp(pkg)
+                            },
+                            onNavigateBack = { currentDestination = "HOME" }
+                        )
                         "LOCKSCREEN" -> LockScreenView(
                             onUnlockRequest = {
                                 currentDestination = "HOME"

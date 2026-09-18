@@ -45,7 +45,7 @@ class ScreenAnalysisManager {
             )
         }
 
-        val rootNode = service.rootInActiveWindow
+        val rootNode = service.getActiveRoot()
         if (rootNode == null) {
             return ScreenAnalysisResult(
                 visibleTexts = emptyList(),

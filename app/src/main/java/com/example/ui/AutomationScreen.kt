@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CheckCircle
@@ -167,7 +167,7 @@ fun AutomationScreen(
                         )
                         SigmaButton(
                             text = "Back",
-                            icon = Icons.Default.ArrowBack,
+                            icon = Icons.AutoMirrored.Filled.ArrowBack,
                             onClick = { onExecuteAction("BACK") },
                             modifier = Modifier.weight(1f)
                         )

@@ -10,7 +10,6 @@ import com.example.ai.AiProvider
 import com.example.apps.AppResolutionResult
 import com.example.apps.AppResolver
 import com.example.automation.AutomationEngine
-import com.example.automation.AutomationPlan
 import com.example.data.ConversationDao
 import com.example.data.db.CommandHistoryItem
 import com.example.data.db.SigmaRepository
@@ -52,7 +51,8 @@ class ActionRouter(
         val trimmed = rawTranscript.trim()
         val lower = trimmed.lowercase()
 
-        Log.d(TAG, "Routing transcript: \"$trimmed\"")
+        Log.i(TAG, "COMMAND_RECEIVED: \"$trimmed\"")
+        Log.i(TAG, "TRANSCRIPT: \"$rawTranscript\"")
 
         // 1. SCREEN VISION & ANALYSIS
         if (lower.contains("analyze screen") || lower.contains("what is on my screen") ||
@@ -74,35 +74,35 @@ class ActionRouter(
                 logHistory(trimmed, true, msg)
                 return@withContext RouterResult.Spoken(msg, "SCREENSHOT")
             } else {
-                val msg = "Accessibility service required to capture screenshot."
+                val msg = "Accessibility service is not connected. Please enable SIGMA in Accessibility Settings to capture screenshots."
                 logHistory(trimmed, false, msg)
                 return@withContext RouterResult.Spoken(msg, "SCREENSHOT")
             }
         }
 
         // 2. HARDWARE & DEVICE CONTROLS (Flashlight, Volume, Brightness)
-        if (lower.contains("flashlight on") || lower.contains("torch on") || lower.contains("torch jalao")) {
+        if (lower.contains("flashlight on") || lower.contains("torch on") || lower.contains("torch jalao") || lower == "flashlight" || lower == "torch") {
             val success = torchController.turnOnTorch()
-            val msg = if (success) "Flashlight turned on." else "Could not enable flashlight."
+            val msg = if (success) "Flashlight turned on." else "Could not enable flashlight on this device."
             logHistory(trimmed, success, msg)
             return@withContext RouterResult.Spoken(msg, "TORCH_ON")
         }
 
-        if (lower.contains("flashlight off") || lower.contains("torch off") || lower.contains("torch band karo")) {
+        if (lower.contains("flashlight off") || lower.contains("torch off") || lower.contains("torch band karo") || lower.contains("torch band")) {
             val success = torchController.turnOffTorch()
             val msg = if (success) "Flashlight turned off." else "Could not disable flashlight."
             logHistory(trimmed, success, msg)
             return@withContext RouterResult.Spoken(msg, "TORCH_OFF")
         }
 
-        if (lower.contains("volume up") || lower.contains("awaz badhao")) {
+        if (lower.contains("volume up") || lower.contains("awaz badhao") || lower.contains("increase volume")) {
             val success = deviceController.adjustVolume(increase = true)
             val msg = if (success) "Volume increased." else "Volume adjusted."
             logHistory(trimmed, true, msg)
             return@withContext RouterResult.Spoken(msg, "VOLUME")
         }
 
-        if (lower.contains("volume down") || lower.contains("awaz kam karo")) {
+        if (lower.contains("volume down") || lower.contains("awaz kam karo") || lower.contains("decrease volume")) {
             val success = deviceController.adjustVolume(increase = false)
             val msg = if (success) "Volume decreased." else "Volume adjusted."
             logHistory(trimmed, true, msg)
@@ -156,11 +156,33 @@ class ActionRouter(
         // 5. STRUCTURED AUTOMATION BEAST LOOP (Chained multi-step or deep UI actions)
         val plan = actionPlanner.planUserCommand(trimmed)
         if (plan.steps.isNotEmpty()) {
+            Log.i(TAG, "SIGMA_AUTOMATION: Routing plan '${plan.title}' with ${plan.steps.size} steps (intent=${plan.intent})")
             val report = automationEngine.executePlanWithReport(plan) { progress ->
-                Log.d(TAG, "Plan progress: $progress")
+                Log.d(TAG, "SIGMA_AUTOMATION: Plan progress: $progress")
             }
-            logHistory(trimmed, report.success, report.finalMessage)
-            return@withContext RouterResult.Spoken(report.finalMessage, "AUTOMATION")
+            val spokenMessage = if (report.success) {
+                if (plan.intent == "PLAY_MEDIA") "Playing." else report.finalMessage
+            } else {
+                report.finalMessage
+            }
+            logHistory(trimmed, report.success, spokenMessage)
+            return@withContext RouterResult.Spoken(spokenMessage, "AUTOMATION")
+        }
+
+        // 5b. DIRECT PLAYBACK CONTROLS (Pause, Resume, Stop)
+        if (lower == "pause" || lower == "pause video" || lower == "pause music" || lower == "rok do" || lower == "roko") {
+            val service = SigmaAccessibilityService.instance
+            val paused = service?.findAndClickPlayControl() ?: false
+            val msg = if (paused) "Paused." else "Could not find active playback to pause."
+            logHistory(trimmed, paused, msg)
+            return@withContext RouterResult.Spoken(msg, "PLAYBACK_CONTROL")
+        }
+        if (lower == "resume" || lower == "resume video" || lower == "resume music" || lower == "chalao wapis") {
+            val service = SigmaAccessibilityService.instance
+            val resumed = service?.findAndClickPlayControl() ?: false
+            val msg = if (resumed) "Resumed." else "Could not find playback control to resume."
+            logHistory(trimmed, resumed, msg)
+            return@withContext RouterResult.Spoken(msg, "PLAYBACK_CONTROL")
         }
 
         // 6. DIRECT APP LAUNCHING (Dynamic resolution using Android PackageManager)
@@ -176,7 +198,7 @@ class ActionRouter(
             val (success, speech) = when (resolution) {
                 is AppResolutionResult.Success -> true to "Opening ${resolution.app.label}."
                 is AppResolutionResult.MultipleMatches -> true to "Opening ${resolution.candidates.first().label}."
-                is AppResolutionResult.NotFound -> false to "I couldn't find an installed app named $query."
+                is AppResolutionResult.NotFound -> false to "I couldn't find an installed app named $query on this phone."
             }
             logHistory(trimmed, success, speech)
             return@withContext RouterResult.Spoken(speech, "APP_LAUNCH")
@@ -197,8 +219,20 @@ class ActionRouter(
             return@withContext RouterResult.Spoken("Opening Bluetooth settings.", "SETTINGS")
         }
 
-        // Fallback: AI response
-        return@withContext RouterResult.Spoken("")
+        // 8. FALLBACK TO GEMINI AI CONVERSATION
+        try {
+            val aiResult = aiProvider.generateText(trimmed)
+            val text = aiResult.getOrNull()
+            if (!text.isNullOrBlank()) {
+                Log.i(TAG, "AI_RESPONSE generated: \"${text.take(60)}...\"")
+                logHistory(trimmed, true, text)
+                return@withContext RouterResult.Spoken(text, "AI_CHAT")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini fallback failed: ${e.message}")
+        }
+
+        return@withContext RouterResult.Spoken("I have received your command: \"$trimmed\".")
     }
 
     private suspend fun logHistory(command: String, isSuccess: Boolean, shortResult: String) {
