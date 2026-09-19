@@ -101,6 +101,7 @@ fun SidebarDrawer(
             // NAVIGATION ITEMS (Mockup matching)
             val menuItems = listOf(
                 Triple("HOME", "Home", Icons.Default.Home),
+                Triple("PERMISSIONS", "Permission Center", Icons.Default.SmartToy),
                 Triple("WORKFLOWS", "Workflows", Icons.Default.AutoFixHigh),
                 Triple("HISTORY", "Chat History", Icons.AutoMirrored.Filled.Chat),
                 Triple("APPS", "App Control", Icons.Default.Apps),

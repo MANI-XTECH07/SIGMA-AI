@@ -22,6 +22,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_REDUCE_MOTION = "reduce_motion"
         private const val KEY_CONFIRM_SENSITIVE = "confirm_sensitive_actions"
         private const val KEY_CUSTOM_API_KEY = "custom_api_key"
+        private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -72,4 +73,8 @@ class SettingsRepository(context: Context) {
     var customApiKey: String
         get() = prefs.getString(KEY_CUSTOM_API_KEY, "") ?: ""
         set(value) = prefs.edit().putString(KEY_CUSTOM_API_KEY, value).apply()
+
+    var isOnboardingCompleted: Boolean
+        get() = prefs.getBoolean(KEY_ONBOARDING_COMPLETED, false)
+        set(value) = prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, value).apply()
 }

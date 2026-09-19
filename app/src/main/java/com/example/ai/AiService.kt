@@ -22,9 +22,11 @@ class AiService(
     companion object {
         private const val TAG = "AiService"
         private val MODELS = listOf(
-            "gemini-3.1-flash-lite-preview",
-            "gemini-flash-latest",
-            "gemini-3.5-flash"
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro"
         )
     }
 
@@ -90,8 +92,8 @@ class AiService(
                             .getJSONObject(0)
                             .getString("text")
                         return@withContext Result.success(text.trim())
-                    } else if (response.code == 429) {
-                        Log.w(TAG, "Model $model quota exceeded (429), trying next fallback...")
+                    } else if (response.code == 429 || response.code == 503 || response.code == 500 || response.code == 502 || response.code == 504) {
+                        Log.w(TAG, "Model $model temporary error (${response.code}), trying next model fallback...")
                         continue
                     } else {
                         Log.e(TAG, "Gemini API error ($model): ${response.code} $responseBody")
@@ -150,6 +152,9 @@ class AiService(
                             .getJSONObject(0)
                             .getString("text")
                         return@withContext Result.success(text.trim())
+                    } else if (response.code == 429 || response.code == 503 || response.code == 500 || response.code == 502 || response.code == 504) {
+                        Log.w(TAG, "Vision model $model temporary error (${response.code}), trying next fallback...")
+                        continue
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Vision request failed for $model: ${e.message}")

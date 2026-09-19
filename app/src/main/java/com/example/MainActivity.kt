@@ -83,6 +83,7 @@ import com.example.ui.HistoryScreen
 import com.example.ui.LockScreenView
 import com.example.ui.MainScreen
 import com.example.ui.PermissionScreen
+import com.example.ui.SigmaOnboardingScreen
 import com.example.ui.ScreenAnalyzerScreen
 import com.example.ui.SettingsScreen
 import com.example.ui.SidebarDrawer
@@ -334,6 +335,23 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        var showOnboarding by remember { mutableStateOf(!settingsRepository.isOnboardingCompleted) }
+        if (showOnboarding) {
+            SigmaOnboardingScreen(
+                onCompleteOnboarding = {
+                    settingsRepository.isOnboardingCompleted = true
+                    showOnboarding = false
+                },
+                onRequestScreenCapture = {
+                    val captureIntent = projectionManager.createScreenCaptureIntent()
+                    if (captureIntent != null) {
+                        projectionLauncher.launch(captureIntent)
+                    }
+                }
+            )
+            return
+        }
+
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
@@ -468,6 +486,15 @@ class MainActivity : ComponentActivity() {
                         "WORKFLOWS" -> WorkflowScreen(
                             repository = workflowRepository,
                             onNavigateBack = { currentDestination = "HOME" }
+                        )
+                        "PERMISSIONS" -> PermissionScreen(
+                            isOnboarding = false,
+                            onRequestScreenCapture = {
+                                val captureIntent = projectionManager.createScreenCaptureIntent()
+                                if (captureIntent != null) {
+                                    projectionLauncher.launch(captureIntent)
+                                }
+                            }
                         )
                         "DIAGNOSTICS" -> DiagnosticsScreen(
                             ttsManager = textToSpeechManager,
